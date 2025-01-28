@@ -9,18 +9,19 @@ from pymongo.errors import PyMongoError
 # Set up logging to log only errors
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
+
 class StickyBot(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.locks = {}  # Per-channel locks to prevent race conditions
 
         # MongoDB connection setup
-        mongo_uri = os.getenv('MONGO_URL')
+        mongo_uri = os.getenv("MONGO_URL")
         try:
             self.mongo_client = AsyncIOMotorClient(mongo_uri, serverSelectionTimeoutMS=5000)
             self.mongo_client.server_info()  # Trigger a connection test
-            self.db = self.mongo_client['sticky_bot_db']
-            self.sticky_collection = self.db['sticky_messages']
+            self.db = self.mongo_client["sticky_bot_db"]
+            self.sticky_collection = self.db["sticky_messages"]
             logging.info("Connected to MongoDB successfully.")
         except Exception as e:
             logging.error(f"Failed to connect to MongoDB: {e}")
@@ -39,7 +40,9 @@ class StickyBot(commands.Cog):
         """Check if the bot has necessary permissions in the channel."""
         permissions = ctx.channel.permissions_for(ctx.guild.me)
         if not permissions.send_messages or not permissions.manage_messages or not permissions.read_messages:
-            await ctx.send("The bot lacks necessary permissions (Send Messages, Manage Messages, Read Messages) in this channel.")
+            await ctx.send(
+                "The bot lacks necessary permissions (Send Messages, Manage Messages, Read Messages) in this channel."
+            )
             return False
         return True
 
@@ -53,25 +56,33 @@ class StickyBot(commands.Cog):
         if not await self.has_permissions(ctx):
             return
 
+        if len(message) > 1900:  # Enforce character limit
+            await ctx.send("The sticky message is too long! Please limit it to 1900 characters.")
+            return
+
         async with self.get_lock(ctx.channel.id):
             channel_id = ctx.channel.id
 
             # Check for existing sticky message
-            existing_doc = await self.sticky_collection.find_one({'channel_id': channel_id})
+            existing_doc = await self.sticky_collection.find_one({"channel_id": channel_id})
             if existing_doc:
                 confirmation_message = await ctx.send(
                     f"A sticky message already exists: `{existing_doc['message']}`.\n"
-                    "React with <:sukoon_tick:1322894604898664478> to overwrite it with the new message or <:sukoon_cross:1322894630684983307> to keep the old message."
+                    "React with ✅ to overwrite it with the new message or ❌ to keep the old message."
                 )
-                await confirmation_message.add_reaction('<:sukoon_tick:1322894604898664478>')
-                await confirmation_message.add_reaction('<:sukoon_cross:1322894630684983307>')
+                await confirmation_message.add_reaction("✅")
+                await confirmation_message.add_reaction("❌")
 
                 def reaction_check(reaction, user):
-                    return user == ctx.author and str(reaction.emoji) in ['<:sukoon_tick:1322894604898664478>', '<:sukoon_cross:1322894630684983307>'] and reaction.message.id == confirmation_message.id
+                    return (
+                        user == ctx.author
+                        and str(reaction.emoji) in ["✅", "❌"]
+                        and reaction.message.id == confirmation_message.id
+                    )
 
                 try:
-                    reaction, user = await self.bot.wait_for('reaction_add', timeout=30.0, check=reaction_check)
-                    if str(reaction.emoji) == '<:sukoon_cross:1322894630684983307>':
+                    reaction, _ = await self.bot.wait_for("reaction_add", timeout=30.0, check=reaction_check)
+                    if str(reaction.emoji) == "❌":
                         await ctx.send("Keeping the old sticky message.")
                         await confirmation_message.delete()
                         return
@@ -82,16 +93,14 @@ class StickyBot(commands.Cog):
 
             # Prepare and save sticky message data
             sticky_data = {
-                'channel_id': channel_id,
-                'guild_id': ctx.guild.id,
-                'message': message,
-                'last_posted': None,
-                'last_message_id': None
+                "channel_id": channel_id,
+                "guild_id": ctx.guild.id,
+                "message": message,
+                "last_posted": None,
+                "last_message_id": None,
             }
             await self.sticky_collection.update_one(
-                {'channel_id': channel_id},
-                {'$set': sticky_data},
-                upsert=True
+                {"channel_id": channel_id}, {"$set": sticky_data}, upsert=True
             )
             await ctx.send(f"Sticky message set for this channel: {message}")
 
@@ -107,7 +116,7 @@ class StickyBot(commands.Cog):
 
         async with self.get_lock(ctx.channel.id):
             channel_id = ctx.channel.id
-            result = await self.sticky_collection.delete_one({'channel_id': channel_id})
+            result = await self.sticky_collection.delete_one({"channel_id": channel_id})
 
             if result.deleted_count > 0:
                 await ctx.send("Sticky message stopped.")
@@ -117,24 +126,18 @@ class StickyBot(commands.Cog):
     @commands.Cog.listener()
     async def on_message(self, message):
         """Repost sticky message when a new message is sent in the channel."""
-        # Ignore messages from the bot itself or DMs
-        if message.author == self.bot.user or not message.guild:
+        if not message.guild or message.author.bot:
             return
 
         permissions = message.channel.permissions_for(message.guild.me)
         if not permissions.send_messages or not permissions.manage_messages:
-            logging.warning(f"Missing permissions in channel {message.channel.id}. Skipping sticky message repost.")
             return
 
-        sticky_doc = await self.sticky_collection.find_one({'channel_id': message.channel.id})
+        sticky_doc = await self.sticky_collection.find_one({"channel_id": message.channel.id})
 
         if sticky_doc:
             async with self.get_lock(message.channel.id):
-                if 'message' not in sticky_doc or 'channel_id' not in sticky_doc:
-                    logging.error(f"Sticky message document missing necessary fields: {sticky_doc}")
-                    return
-
-                last_message_id = sticky_doc.get('last_message_id')
+                last_message_id = sticky_doc.get("last_message_id")
                 if last_message_id:
                     try:
                         last_message = await message.channel.fetch_message(last_message_id)
@@ -144,37 +147,37 @@ class StickyBot(commands.Cog):
                         pass
 
                 try:
-                    sticky_message = await message.channel.send(sticky_doc['message'])
-
+                    sticky_message = await message.channel.send(sticky_doc["message"])
                     await self.sticky_collection.update_one(
-                        {'channel_id': message.channel.id},
-                        {'$set': {
-                            'last_message_id': sticky_message.id,
-                            'last_posted': discord.utils.utcnow().isoformat()
-                        }}
+                        {"channel_id": message.channel.id},
+                        {
+                            "$set": {
+                                "last_message_id": sticky_message.id,
+                                "last_posted": discord.utils.utcnow().isoformat(),
+                            }
+                        },
                     )
                 except Exception as e:
-                    logging.error(f"Error sending sticky message: {str(e)}")
+                    logging.error(f"Error sending sticky message: {e}")
 
     @tasks.loop(seconds=600)
     async def sticky_task(self):
-        """Task to repost sticky messages every 1 minute."""
+        """Task to repost sticky messages periodically."""
         async for document in self.sticky_collection.find():
             try:
-                if 'channel_id' not in document or 'message' not in document:
+                if "channel_id" not in document or "message" not in document:
                     logging.error(f"Skipping invalid sticky message document: {document}")
                     continue
 
-                channel_id = document['channel_id']
+                channel_id = document["channel_id"]
                 channel = self.bot.get_channel(channel_id)
 
                 if not channel:
-                    logging.info(f"Channel {channel_id} no longer exists. Removing from database.")
-                    await self.sticky_collection.delete_one({'channel_id': channel_id})
+                    await self.sticky_collection.delete_one({"channel_id": channel_id})
                     continue
 
                 async with self.get_lock(channel_id):
-                    last_message_id = document.get('last_message_id')
+                    last_message_id = document.get("last_message_id")
                     if last_message_id:
                         try:
                             last_message = await channel.fetch_message(last_message_id)
@@ -183,21 +186,20 @@ class StickyBot(commands.Cog):
                         except discord.NotFound:
                             pass
 
-                    sticky_message = await channel.send(document['message'])
-
+                    sticky_message = await channel.send(document["message"])
                     await self.sticky_collection.update_one(
-                        {'channel_id': channel_id},
-                        {'$set': {
-                            'last_message_id': sticky_message.id,
-                            'last_posted': discord.utils.utcnow().isoformat()
-                        }}
+                        {"channel_id": channel_id},
+                        {
+                            "$set": {
+                                "last_message_id": sticky_message.id,
+                                "last_posted": discord.utils.utcnow().isoformat(),
+                            }
+                        },
                     )
-
             except discord.Forbidden:
-                logging.error(f"Failed to post sticky message in channel {channel_id}. Missing permissions.")
+                logging.error(f"Missing permissions in channel {channel_id}. Skipping sticky message.")
             except Exception as e:
                 logging.error(f"Error processing sticky message document: {e}")
-                logging.error(f"Problematic document: {document}")
 
     @sticky_task.before_loop
     async def before_sticky_task(self):
@@ -208,6 +210,7 @@ class StickyBot(commands.Cog):
         if self.sticky_task.is_running():
             self.sticky_task.cancel()
         self.mongo_client.close()
+
 
 # Add the cog to the bot
 async def setup(bot):
