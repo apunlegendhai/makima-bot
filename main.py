@@ -39,6 +39,7 @@ cogs = [
     "cogs.sticky",
     "cogs.thread",
     "cogs.AvatarBannerUpdater",
+    "cogs.autoresponder",
 ]
 
 async def load_cogs():
