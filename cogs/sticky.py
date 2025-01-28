@@ -156,7 +156,7 @@ class StickyBot(commands.Cog):
                 except Exception as e:
                     logging.error(f"Error sending sticky message: {str(e)}")
 
-    @tasks.loop(seconds=60)
+    @tasks.loop(seconds=600)
     async def sticky_task(self):
         """Task to repost sticky messages every 1 minute."""
         async for document in self.sticky_collection.find():
