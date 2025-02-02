@@ -237,17 +237,29 @@ class RoleManagement(commands.Cog):
             self.dynamic_commands[config.guild_id].append(custom_name)
 
     async def check_required_role(self, ctx, config: RoleManagementConfig) -> bool:
-        """Check if user has the required role."""
+        """
+        Validates if the user has the required role to execute commands.
+        """
         if not config.reqrole_id:
             await ctx.send(embed=discord.Embed(
-                description=f"{EMOJI_INFO} | No required role set for this server.",
-                color=EMBED_COLOR))
+                description=f"{EMOJI_INFO} | No required role has been set for this server. Please ask an admin to set one.",
+                color=EMBED_COLOR
+            ))
             return False
 
-        if config.reqrole_id not in [role.id for role in ctx.author.roles]:
+        required_role = ctx.guild.get_role(config.reqrole_id)
+        if not required_role:
             await ctx.send(embed=discord.Embed(
-                description=f"{EMOJI_INFO} | You lack the required role.",
-                color=EMBED_COLOR))
+                description=f"{EMOJI_INFO} | The required role set for this server no longer exists. Please ask an admin to update it.",
+                color=EMBED_COLOR
+            ))
+            return False
+
+        if required_role not in ctx.author.roles:
+            await ctx.send(embed=discord.Embed(
+                description=f"{EMOJI_INFO} | You lack the required role (**{required_role.name}**) to use this command.",
+                color=EMBED_COLOR
+            ))
             return False
 
         return True
@@ -273,7 +285,6 @@ class RoleManagement(commands.Cog):
                     description=f"{ctx.author.mention} {action} role '{role.name}' for {member.mention}.",
                     color=EMBED_COLOR))
 
-    # Fix for setting the required role
     @commands.command()
     @commands.has_permissions(administrator=True)
     async def setreqrole(self, ctx, role: discord.Role):
@@ -301,41 +312,19 @@ class RoleManagement(commands.Cog):
                 color=EMBED_COLOR
             ))
 
-    # Improved validation for checking the required role
-    async def check_required_role(self, ctx, config: RoleManagementConfig) -> bool:
-        """
-        Validates if the user has the required role to execute commands.
-        """
-        if not config.reqrole_id:
-            await ctx.send(embed=discord.Embed(
-                description=f"{EMOJI_INFO} | No required role has been set for this server. Please ask an admin to set one.",
-                color=EMBED_COLOR
-            ))
-            return False
-
-        required_role = ctx.guild.get_role(config.reqrole_id)
-        if not required_role:
-            await ctx.send(embed=discord.Embed(
-                description=f"{EMOJI_INFO} | The required role set for this server no longer exists. Please ask an admin to update it.",
-                color=EMBED_COLOR
-            ))
-            return False
-
-        if required_role not in ctx.author.roles:
-            await ctx.send(embed=discord.Embed(
-                description=f"{EMOJI_INFO} | You lack the required role (**{required_role.name}**) to use this command.",
-                color=EMBED_COLOR
-            ))
-            return False
-
-        return True
-        
     @commands.command()
     @commands.has_permissions(administrator=True)
     async def setrole(self, ctx, custom_name: str, role: discord.Role):
         """Map a custom role name to an existing role."""
         config = await self.load_guild_config(ctx.guild.id)
         sanitized_name = self.sanitize_role_name(custom_name)
+
+        if not sanitized_name:
+            await ctx.send(embed=discord.Embed(
+                description=f"{EMOJI_INFO} | Custom name must contain at least one alphanumeric character.",
+                color=EMBED_COLOR
+            ))
+            return
 
         role_mappings = config.role_mappings.copy()
         role_mappings[sanitized_name] = role.id
