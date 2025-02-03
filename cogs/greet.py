@@ -17,16 +17,16 @@ class GreetingCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.default_greetings = [
-            "✨ Welcome, {user}, to {server}! A new journey begins—make yourself at home.",
-            "☁️ Hey {user}, you’ve arrived at {server}! Breathe in the good vibes and enjoy your stay.",
-            "🌿 {user}, welcome to {server}! A space to connect, share, and grow together.",
-            "🌸 Welcome aboard, {user}! {server} is a place of warmth and camaraderie—glad you’re here.",
-            "🌙 Hi {user}, you’ve found your way to {server}. Let’s create wonderful memories together!",
-            "💫 {user}, welcome to {server}! You bring new energy to our growing community of {member_count}.",
-            "🌷 Glad to have you here, {user}! {server} just got brighter with your presence.",
-            "☀️ A warm welcome to you, {user}! {server} is now {member_count} strong—let’s make it unforgettable.",
-            "🌊 Hello {user}, welcome to {server}! Let the conversations flow and friendships grow.",
-            "🕊 {user}, you’re now part of {server}! Settle in, unwind, and enjoy the journey."
+            "<a:sukoon_Watermelon:1325703602379161676> Welcome, {user}, to {server}! A new journey begins—make yourself at home.",
+            "<a:sukoon_white_bo:1335856241011855430> Hey {user}, you’ve arrived at {server}! Breathe in the good vibes and enjoy your stay.",
+            "<a:sukoon_bandaid:1323990361647087729> {user}, welcome to {server}! A space to connect, share, and grow together.",
+            "<:sukoon_btfl:1335856043477041204> Welcome aboard, {user}! {server} is a place of warmth and camaraderie—glad you’re here.",
+            "<a:sukoon_butterfly:1323990263609298967> Hi {user}, you’ve found your way to {server}. Let’s create wonderful memories together!",
+            "<a:sukoon_:1335855101897609226> {user}, welcome to {server}! You bring new energy to our growing community of {member_count}.",
+            "<a:sukoon_rabbi:1335855768301473812> Glad to have you here, {user}! {server} just got brighter with your presence.",
+            "<a:sukoon_yflower:1323990499660664883> A warm welcome to you, {user}! {server} is now {member_count} strong—let’s make it unforgettable.",
+            "<:sukoon_starr:1335855541335097408> Hello {user}, welcome to {server}! Let the conversations flow and friendships grow.",
+            "<a:heartspar:1335854160322498653> {user}, you’re now part of {server}! Settle in, unwind, and enjoy the journey."
         ]
 
 
@@ -309,13 +309,19 @@ class GreetingCog(commands.Cog):
                         if not channel.permissions_for(guild.me).send_messages:
                             raise discord.Forbidden(f"No permissions in {channel.name}")
 
-                        await channel.send(message)
+                        # Send the greeting message and schedule deletion
+                        sent_message = await channel.send(message)
+                        await sent_message.delete(delay=60)  # Delete after 60 seconds
                         success = True
                         error_msg = None
                     except discord.HTTPException as e:
                         success = False
                         error_msg = str(e)
                         logger.error(f"Error sending greeting in {channel.name}: {error_msg}")
+                    except Exception as e:
+                        success = False
+                        error_msg = str(e)
+                        logger.error(f"Unexpected error sending greeting: {e}")
 
                     # Log to history
                     timestamp = datetime.utcnow().isoformat()
