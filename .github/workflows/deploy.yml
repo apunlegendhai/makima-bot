@@ -8,6 +8,7 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest  # Use the latest Ubuntu runner
+    environment: production  # Specify that this deployment is for the 'production' environment
 
     steps:
     - name: Checkout repository
