@@ -1,0 +1,29 @@
+name: Deploy Bot to EC2
+
+on:
+  push:
+    branches:
+      - main  # Trigger deployment when changes are pushed to the 'main' branch.
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v2  # This checks out your repository
+
+    - name: Set up SSH key
+      uses: webfactory/ssh-agent@v0.5.3  # This sets up the SSH key for authentication
+      with:
+        ssh-private-key: ${{ secrets.EC2_SSH_KEY }}
+
+    - name: Connect to EC2 and Deploy Bot
+      run: |
+        ssh -o StrictHostKeyChecking=no ubuntu@${{ secrets.EC2_IP_ADDRESS }} << 'EOF'
+          cd ~/makima-bot  # Navigate to your bot directory
+          git pull origin main  # Pull the latest code from the repository
+          source venv/bin/activate  # Activate the virtual environment
+          pip install -r requirements.txt  # Install any dependencies
+          pm2 restart main.py --interpreter python3  # Restart the bot using PM2
+        EOF
