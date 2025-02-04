@@ -11,7 +11,7 @@ class BotConfig:
     def __init__(self):
         load_dotenv()
         self.token = self._validate_token()
-        self.cogs = ["cogs.greet",cogs.status_changer","cogs.dragmee","cogs.AvatarBannerUpdater","cogs.giveaway","cogs.steal","cogs.stats","cogs.afk_cog","cogs.purge","cogs.sticky","cogs.reqrole","cogs.confess"]
+        self.cogs = ["cogs.greet",cogs.status_changer","cogs.dragmee","cogs.AvatarBannerUpdater","cogs.giveaway","cogs.steal","cogs.stats","cogs.afk_cog","cogs.purge","cogs.key_generator","cogs.av","cogs.thread","cogs.sticky","cogs.reqrole","cogs.confess"]
         self.log_dir = "logs"
         self.log_file = os.path.join(self.log_dir, "bot.log")
         self.log_level = logging.INFO
