@@ -7,20 +7,25 @@ on:
 
 jobs:
   deploy:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest  # Use the latest Ubuntu runner
 
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v2  # This checks out your repository
+      uses: actions/checkout@v2  # This checks out your repository to the runner
 
     - name: Set up SSH key
       uses: webfactory/ssh-agent@v0.5.3  # This sets up the SSH key for authentication
       with:
         ssh-private-key: ${{ secrets.EC2_SSH_KEY }}  # Make sure this is the correct secret name
 
+    - name: Debug EC2 IP Address  # Optional step to debug EC2 IP
+      run: echo "EC2 IP Address: ${{ secrets.EC2_IP_ADDRESS }}"
+
     - name: Connect to EC2 and Deploy Bot
       run: |
         echo "Starting deployment..."
+
+        # Connect to EC2 instance via SSH
         ssh -o StrictHostKeyChecking=no ubuntu@${{ secrets.EC2_IP_ADDRESS }} << 'EOF'
           echo "Connected to EC2"
 
@@ -29,7 +34,7 @@ jobs:
           echo "Pulling latest code from GitHub..."
           git pull origin main  # Pull the latest code from the repository
 
-          # Activate virtual environment
+          # Activate the virtual environment
           echo "Activating virtual environment..."
           source venv/bin/activate
 
