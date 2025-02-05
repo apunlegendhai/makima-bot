@@ -2,145 +2,237 @@ import discord
 from discord.ext import commands
 import logging
 import os
-import asyncio
-import traceback
+import json
 from dotenv import load_dotenv
+import asyncio
+import aiohttp
+from collections import defaultdict
+import aiofiles
+import sys
+from typing import Dict, DefaultDict
 
-# Load environment variables early
+# Load environment variables
 load_dotenv()
 
-class BotConfig:
-    """Centralized configuration management."""
-    def __init__(self):
-        self.token = self._validate_token()
-        self.cogs = [
-            "cogs.greet", "cogs.autoresponder", "cogs.status_changer", "cogs.dragmee",
-            "cogs.AvatarBannerUpdater", "cogs.giveaway", "cogs.steal", "cogs.stats",
-            "cogs.afk_cog", "cogs.purge", "cogs.key_generator", "cogs.av",
-            "cogs.thread", "cogs.sticky", "cogs.reqrole", "cogs.confess"
+DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+
+# Directory constants
+LOGS_DIR = "logs"
+DATABASE_DIR = "database"
+COMMAND_USAGE_FILE = os.path.join(DATABASE_DIR, "command_usage.json")
+
+def setup_directories() -> None:
+    for directory in (LOGS_DIR, DATABASE_DIR):
+        os.makedirs(directory, exist_ok=True)
+
+def setup_logging() -> None:
+    logging.basicConfig(
+        filename=os.path.join(LOGS_DIR, "bot.log"),
+        level=logging.INFO,
+        format='%(asctime)s - %(levelname)s - %(message)s'
+    )
+
+def validate_environment() -> None:
+    if not all([DISCORD_TOKEN, WEBHOOK_URL]):
+        missing = []
+        if not DISCORD_TOKEN:
+            missing.append("DISCORD_TOKEN")
+        if not WEBHOOK_URL:
+            missing.append("WEBHOOK_URL")
+        raise ValueError(f"Missing required environment variables: {', '.join(missing)}")
+
+class DiscordBot(commands.Bot):
+    def __init__(self) -> None:
+        intents = discord.Intents.default()
+        intents.members = True
+        intents.message_content = True
+
+        super().__init__(command_prefix=".", intents=intents)
+        self.command_usage: DefaultDict[str, int] = defaultdict(int)
+        self.session: aiohttp.ClientSession = None
+        self.command_locks: Dict[str, asyncio.Lock] = {}
+        self.processing_commands: Dict[str, bool] = {}
+        self.cogs_list = [
+            "cogs.greet",
+            "cogs.autoresponder",
+            "cogs.status_changer",
+            "cogs.dragmee",
+            "cogs.AvatarBannerUpdater",
+            "cogs.giveaway",
+            "cogs.steal",
+            "cogs.stats",
+            "cogs.afk_cog",
+            "cogs.purge",
+            "cogs.key_generator",
+            "cogs.av",
+            "cogs.thread",
+            "cogs.sticky",
+            "cogs.reqrole",
+            "cogs.confess"
         ]
-        self.log_dir = "logs"
-        self.log_file = os.path.join(self.log_dir, "bot.log")
-        self.log_level = logging.INFO
-        self.command_prefix = "."
-        self.sync_retry_attempts = 5
-        self._setup_logging()
 
-    def _validate_token(self) -> str:
-        """Validate and retrieve the Discord token."""
-        token = os.getenv("DISCORD_TOKEN")
-        if not token:
-            raise ValueError("No DISCORD_TOKEN found in .env file")
-        return token
+    async def setup_hook(self) -> None:
+        self.session = aiohttp.ClientSession()
+        await self.load_command_usage()
+        await self.load_cogs()
 
-    def _setup_logging(self):
-        """Ensure log directory exists and set up logging."""
-        os.makedirs(self.log_dir, exist_ok=True)
-        logging.basicConfig(
-            level=self.log_level,
-            format="%(asctime)s - %(levelname)s - %(message)s",
-            handlers=[
-                logging.FileHandler(self.log_file),
-                logging.StreamHandler()
-            ]
-        )
+    async def close(self) -> None:
+        if self.session:
+            await self.session.close()
+        await super().close()
 
-class CustomHelpCommand(commands.DefaultHelpCommand):
-    """Enhanced help command with embed support."""
-    async def send_bot_help(self, mapping):
-        embed = discord.Embed(title="Bot Commands", color=discord.Color.blue())
-        for cog, cmds in mapping.items():
-            if cog:
-                filtered_cmds = await self.filter_commands(cmds, sort=True)
-                if filtered_cmds:
-                    cmd_list = [cmd.name for cmd in filtered_cmds]
-                    embed.add_field(name=cog.qualified_name, value=", ".join(cmd_list), inline=False)
+    async def get_command_lock(self, user_id: int, command_name: str) -> asyncio.Lock:
+        lock_key = f"{user_id}:{command_name}"
+        if lock_key not in self.command_locks:
+            self.command_locks[lock_key] = asyncio.Lock()
+        return self.command_locks[lock_key]
 
-        await self.get_destination().send(embed=embed)
+    async def load_command_usage(self) -> None:
+        try:
+            if os.path.exists(COMMAND_USAGE_FILE):
+                async with aiofiles.open(COMMAND_USAGE_FILE, 'r') as f:
+                    content = await f.read()
+                    self.command_usage = defaultdict(int, json.loads(content))
+        except Exception as e:
+            logging.error(f"Error loading command usage data: {e}")
+            self.command_usage = defaultdict(int)
 
-class Bot(commands.Bot):
-    def __init__(self, config: BotConfig):
-        intents = discord.Intents.all()  # Allow all intents
-        super().__init__(
-            command_prefix=config.command_prefix,
-            intents=intents,
-            help_command=CustomHelpCommand()
-        )
-        self.config = config
+    async def save_command_usage(self) -> None:
+        try:
+            async with aiofiles.open(COMMAND_USAGE_FILE, 'w') as f:
+                await f.write(json.dumps(dict(self.command_usage)))
+        except Exception as e:
+            logging.error(f"Failed to save command usage data: {e}")
 
-    async def load_extensions(self):
-        """Load bot extensions with error handling."""
-        for extension in self.config.cogs:
+    async def load_cogs(self) -> None:
+        for cog in self.cogs_list:
             try:
-                await self.load_extension(extension)
-                logging.info(f"✅ Loaded extension: {extension}")
-            except ModuleNotFoundError:
-                logging.error(f"❌ Cog not found: {extension}")
-            except commands.ExtensionFailed as e:
-                logging.error(f"❌ Failed to load {extension}: {traceback.format_exc()}")
+                if cog not in self.extensions:
+                    await self.load_extension(cog)
+                    logging.info(f"Loaded {cog}")
             except Exception as e:
-                logging.error(f"❌ Unknown error loading {extension}: {e}")
+                logging.error(f"Error loading {cog}: {e}")
 
-    async def sync_commands(self):
-        """Sync commands with rate limit handling."""
-        for attempt in range(1, self.config.sync_retry_attempts + 1):
+    async def send_error_report(self, error_message: str) -> None:
+        if not self.session:
+            return
+
+        try:
+            async with self.session.post(WEBHOOK_URL, json={"content": error_message}) as response:
+                response.raise_for_status()
+        except Exception as e:
+            logging.error(f"Failed to send error report: {e}")
+
+    async def process_commands(self, message):
+        if message.author.bot:
+            return
+
+        ctx = await self.get_context(message)
+        if ctx.command is None:
+            return
+
+        command_key = f"{ctx.author.id}:{ctx.command.name}"
+        if self.processing_commands.get(command_key, False):
+            return
+
+        try:
+            self.processing_commands[command_key] = True
+            await super().process_commands(message)
+        finally:
+            self.processing_commands[command_key] = False
+
+class Bot(DiscordBot):
+    async def setup(self) -> None:
+        @self.command()
+        @commands.cooldown(1, 3, commands.BucketType.user)
+        async def ping(ctx):
+            lock = await self.get_command_lock(ctx.author.id, ctx.command.name)
+            if lock.locked():
+                return
+
+            async with lock:
+                await ctx.send(f'<a:sukoon_greendot:1322894177775783997> Latency: {self.latency * 1000:.2f}ms')
+
+        @self.command()
+        @commands.cooldown(1, 5, commands.BucketType.user)
+        async def usage(ctx):
+            lock = await self.get_command_lock(ctx.author.id, ctx.command.name)
+            if lock.locked():
+                return
+
+            async with lock:
+                embed = discord.Embed(title="Command Usage Statistics", color=discord.Color.blue())
+                for command, count in self.command_usage.items():
+                    embed.add_field(name=command, value=f"Used {count} times", inline=False)
+                await ctx.send(embed=embed)
+
+        @self.command()
+        @commands.is_owner()
+        @commands.cooldown(1, 5, commands.BucketType.user)
+        async def reload(ctx, cog: str):
+            lock = await self.get_command_lock(ctx.author.id, ctx.command.name)
+            if lock.locked():
+                return
+
+            async with lock:
+                try:
+                    await self.reload_extension(cog)
+                    await ctx.send(f'{cog} reloaded.')
+                    logging.info(f"{cog} reloaded")
+                except Exception as e:
+                    await ctx.send(f"Error reloading {cog}: {e}")
+                    logging.error(f"Error reloading {cog}: {e}")
+
+        @self.event
+        async def on_ready():
+            print(f'Logged in as {self.user}')
             try:
                 synced = await self.tree.sync()
-                logging.info(f"✅ Synced {len(synced)} commands successfully.")
-                return
-            except discord.HTTPException as e:
-                if e.code == 429:  # Rate limited
-                    wait_time = e.retry_after or (2 ** attempt)
-                    logging.warning(f"⏳ Rate limited. Retrying {attempt}/{self.config.sync_retry_attempts} in {wait_time:.2f} seconds...")
-                    await asyncio.sleep(wait_time)
-                else:
-                    logging.error(f"❌ Command sync failed: {e}")
-                    break
+                print(f"Synced {len(synced)} command(s)")
+                print("Registered slash commands:")
+                for command in self.tree.get_commands():
+                    print(f"- {command.name}")
+            except Exception as e:
+                logging.error(f"Error syncing commands: {e}")
 
-    async def setup_hook(self):
-        """Async setup for bot initialization."""
-        await self.load_extensions()
-        await self.sync_commands()
+        @self.event
+        async def on_command(ctx):
+            self.command_usage[ctx.command.name] += 1
+            logging.info(f"Command {ctx.command.name} used by {ctx.author}")
+            await self.save_command_usage()
+
+        @self.event
+        async def on_command_error(ctx, error):
+            if isinstance(error, commands.CommandOnCooldown):
+                await ctx.send(f"Please wait {error.retry_after:.1f}s before using this command again.")
+                return
+
+            error_msg = f"Error in {ctx.command}: {str(error)}"
+            logging.error(error_msg)
+
+            if isinstance(error, commands.CommandNotFound):
+                return
+            elif isinstance(error, commands.MissingRequiredArgument):
+                await ctx.send(f"Missing required argument: {error.param}")
+            elif isinstance(error, commands.CheckFailure):
+                await ctx.send("You don't have permission to use this command.")
+            else:
+                await ctx.send(f"An error occurred: {str(error)}")
+                await self.send_error_report(error_msg)
 
 def main():
-    config = BotConfig()
-    bot = Bot(config)
+    try:
+        setup_directories()
+        setup_logging()
+        validate_environment()
 
-    @bot.event
-    async def on_ready():
-        """Triggered when bot is fully connected."""
-        logging.info(f"✅ Logged in as {bot.user} (ID: {bot.user.id})")
-
-    @bot.event
-    async def on_command_error(ctx, error):
-        """Centralized error handling to prevent duplicate messages."""
-        if hasattr(ctx.command, "on_error"):
-            return  # Skip commands that have their own error handlers.
-
-        ignored_errors = (commands.CommandNotFound,)  # Ignore unknown command errors.
-
-        if isinstance(error, ignored_errors):
-            return  # Don't send an error message for ignored errors.
-
-        error_map = {
-            commands.MissingRequiredArgument: f"❌ Missing argument. Use `{ctx.prefix}help {ctx.command}`.",
-            commands.BadArgument: f"❌ Invalid argument. Use `{ctx.prefix}help {ctx.command}`."
-        }
-
-        for error_type, message in error_map.items():
-            if isinstance(error, error_type):
-                return await ctx.send(message)
-
-        logging.error(f"❌ Unhandled error: {error}")
-        await ctx.send("An unexpected error occurred.")
-
-    @bot.command()
-    async def ping(ctx):
-        """Latency check command."""
-        await ctx.send(f"🏓 Latency: {bot.latency * 1000:.2f}ms")
-
-    bot.run(config.token, reconnect=True)  # Auto-reconnect enabled
+        bot = Bot()
+        asyncio.run(bot.setup())
+        bot.run(DISCORD_TOKEN)
+    except Exception as e:
+        logging.critical(f"Critical error: {e}")
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()
-    
