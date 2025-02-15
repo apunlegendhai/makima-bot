@@ -1,4 +1,155 @@
-   await asyncio.sleep(0.5)  # Reduced delay between batches
+import discord
+from discord.ext import commands, tasks
+from discord import app_commands
+import logging
+import os
+import aiosqlite
+import asyncio
+from datetime import datetime
+from typing import Optional, Dict, List, DefaultDict
+from collections import defaultdict
+import aiohttp
+
+# Directory constants
+DATABASE_DIR = "database"
+LOG_DIR = "logs"
+
+# Required environment variables
+REQUIRED_ENV_VARS = ["DISCORD_TOKEN", "WEBHOOK_URL"]
+
+# Validate environment variables
+for var in REQUIRED_ENV_VARS:
+    if not os.getenv(var):
+        raise EnvironmentError(f"Missing required environment variable: {var}")
+
+# Setup logging - remove all handlers first
+logger = logging.getLogger('discord')
+logger.setLevel(logging.INFO)
+logger.propagate = False
+
+# Remove any existing handlers
+for handler in logger.handlers[:]:
+    logger.removeHandler(handler)
+
+# Add file handler only
+handler = logging.FileHandler(
+    filename=os.path.join(LOG_DIR, 'discord.log'),
+    encoding='utf-8',
+    mode='a'
+)
+handler.setFormatter(logging.Formatter(
+    '%(asctime)s:%(levelname)s:%(name)s: %(message)s'
+))
+logger.addHandler(handler)
+
+# Ensure required directories exist
+os.makedirs(DATABASE_DIR, exist_ok=True)
+os.makedirs(LOG_DIR, exist_ok=True)
+
+
+class StatusManager(commands.Cog):
+    def __init__(self, bot):
+        self.bot = bot
+        self.db_path = os.path.join(DATABASE_DIR, "vanityroles.db")
+        self.rate_limits: DefaultDict[int, DefaultDict[int, int]] = defaultdict(lambda: defaultdict(int))
+        self.last_check: Dict[int, float] = {}
+        self.pending_role_changes: DefaultDict[int, List] = defaultdict(list)
+        self.member_role_states: DefaultDict[str, bool] = defaultdict(bool)
+        self.session: Optional[aiohttp.ClientSession] = None
+
+        # Setup database and start tasks
+        asyncio.create_task(self.setup_database())
+        self.start_checker.start()
+        logger.info("StatusManager cog initialized")
+
+    async def cog_load(self):
+        self.session = aiohttp.ClientSession()
+        logger.info("Cog loaded successfully")
+
+    async def cog_unload(self):
+        self.start_checker.cancel()
+        if self.session:
+            await self.session.close()
+        logger.info("StatusManager cog unloaded")
+
+    async def send_error_webhook(self, error_message: str):
+        try:
+            await self.bot.send_error_report(error_message)
+            logger.info("Error webhook sent successfully")
+        except Exception as e:
+            logger.error(f"Failed to send error report: {e}")
+
+    @tasks.loop(seconds=60)
+    async def start_checker(self):
+        """Main status checking loop"""
+        if not self.bot.is_ready():
+            return
+
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
+                async with db.execute("SELECT * FROM guild_configs") as cursor:
+                    configs = await cursor.fetchall()
+
+            current_time = datetime.utcnow().timestamp()
+
+            for config in configs:
+                guild_id = config['guild_id']
+                if current_time - self.last_check.get(guild_id, 0) < 60:
+                    continue
+
+                await self.check_guild_statuses(config)
+                self.last_check[guild_id] = current_time
+
+        except Exception as e:
+            logger.error(f"Status checker error: {e}", exc_info=True)
+
+    @start_checker.before_loop
+    async def before_checker(self):
+        await self.bot.wait_until_ready()
+        logger.info("Status checker ready to start")
+
+    async def check_guild_statuses(self, config):
+        """Process status checks for a single guild with improved rate limiting"""
+        guild_id = config['guild_id']
+        guild = self.bot.get_guild(guild_id)
+
+        if not guild:
+            logger.warning(f"Could not find guild {guild_id}")
+            return
+
+        role = guild.get_role(config['role_id'])
+        if not role:
+            logger.warning(f"Could not find role {config['role_id']} in guild {guild_id}")
+            return
+
+        # Batch process members with improved rate limiting
+        batch_size = 10
+        current_batch = []
+        current_time = datetime.utcnow().timestamp()
+
+        for member in guild.members:
+            if member.bot:
+                continue
+
+            # Check rate limiting with shorter cooldown
+            last_update = self.rate_limits[guild_id].get(member.id, 0)
+            if current_time - last_update < 15:  # Reduced from 30 to 15 seconds
+                continue
+
+            member_key = f"{guild_id}:{member.id}"
+            current_has_role = role in member.roles
+
+            # Skip if state hasn't changed
+            if member_key in self.member_role_states and self.member_role_states[member_key] == current_has_role:
+                continue
+
+            current_batch.append(member)
+
+            if len(current_batch) >= batch_size:
+                await self._process_member_batch(current_batch, role, config, current_time)
+                current_batch = []
+                await asyncio.sleep(0.5)  # Reduced delay between batches
 
         # Process remaining members
         if current_batch:
