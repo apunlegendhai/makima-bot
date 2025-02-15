@@ -66,6 +66,7 @@ class DiscordBot(commands.Bot):
             "cogs.purge",
             "cogs.key_generator",
             "cogs.av",
+	    "cogs.vanityrole",
             "cogs.thread",
             "cogs.sticky",
             "cogs.reqrole",
@@ -74,7 +75,6 @@ class DiscordBot(commands.Bot):
 
     async def setup_hook(self) -> None:
         self.session = aiohttp.ClientSession()
-        await self.load_command_usage()
         await self.load_cogs()
 
     async def close(self) -> None:
@@ -87,23 +87,6 @@ class DiscordBot(commands.Bot):
         if lock_key not in self.command_locks:
             self.command_locks[lock_key] = asyncio.Lock()
         return self.command_locks[lock_key]
-
-    async def load_command_usage(self) -> None:
-        try:
-            if os.path.exists(COMMAND_USAGE_FILE):
-                async with aiofiles.open(COMMAND_USAGE_FILE, 'r') as f:
-                    content = await f.read()
-                    self.command_usage = defaultdict(int, json.loads(content))
-        except Exception as e:
-            logging.error(f"Error loading command usage data: {e}")
-            self.command_usage = defaultdict(int)
-
-    async def save_command_usage(self) -> None:
-        try:
-            async with aiofiles.open(COMMAND_USAGE_FILE, 'w') as f:
-                await f.write(json.dumps(dict(self.command_usage)))
-        except Exception as e:
-            logging.error(f"Failed to save command usage data: {e}")
 
     async def load_cogs(self) -> None:
         for cog in self.cogs_list:
@@ -154,36 +137,6 @@ class Bot(DiscordBot):
             async with lock:
                 await ctx.send(f'<a:sukoon_greendot:1322894177775783997> Latency: {self.latency * 1000:.2f}ms')
 
-        @self.command()
-        @commands.cooldown(1, 5, commands.BucketType.user)
-        async def usage(ctx):
-            lock = await self.get_command_lock(ctx.author.id, ctx.command.name)
-            if lock.locked():
-                return
-
-            async with lock:
-                embed = discord.Embed(title="Command Usage Statistics", color=discord.Color.blue())
-                for command, count in self.command_usage.items():
-                    embed.add_field(name=command, value=f"Used {count} times", inline=False)
-                await ctx.send(embed=embed)
-
-        @self.command()
-        @commands.is_owner()
-        @commands.cooldown(1, 5, commands.BucketType.user)
-        async def reload(ctx, cog: str):
-            lock = await self.get_command_lock(ctx.author.id, ctx.command.name)
-            if lock.locked():
-                return
-
-            async with lock:
-                try:
-                    await self.reload_extension(cog)
-                    await ctx.send(f'{cog} reloaded.')
-                    logging.info(f"{cog} reloaded")
-                except Exception as e:
-                    await ctx.send(f"Error reloading {cog}: {e}")
-                    logging.error(f"Error reloading {cog}: {e}")
-
         @self.event
         async def on_ready():
             print(f'Logged in as {self.user}')
@@ -198,9 +151,7 @@ class Bot(DiscordBot):
 
         @self.event
         async def on_command(ctx):
-            self.command_usage[ctx.command.name] += 1
             logging.info(f"Command {ctx.command.name} used by {ctx.author}")
-            await self.save_command_usage()
 
         @self.event
         async def on_command_error(ctx, error):
