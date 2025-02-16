@@ -23,7 +23,7 @@ for var in REQUIRED_ENV_VARS:
         raise EnvironmentError(f"Missing required environment variable: {var}")
 
 # Setup logging - remove all handlers first
-logger = logging.getLogger('discord')
+logger = logging.getLogger('bot')
 logger.setLevel(logging.INFO)
 logger.propagate = False
 
