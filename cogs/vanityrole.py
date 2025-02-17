@@ -6,7 +6,6 @@ import os
 import aiosqlite
 import asyncio
 from datetime import datetime
-from typing import Optional, Dict, List, DefaultDict
 from collections import defaultdict
 import aiohttp
 
@@ -14,95 +13,99 @@ import aiohttp
 DATABASE_DIR = "database"
 LOG_DIR = "logs"
 
-# Required environment variables
-REQUIRED_ENV_VARS = ["DISCORD_TOKEN", "WEBHOOK_URL"]
-
-# Validate environment variables
-for var in REQUIRED_ENV_VARS:
-    if not os.getenv(var):
-        raise EnvironmentError(f"Missing required environment variable: {var}")
-
-# Setup logging - remove all handlers first
-logger = logging.getLogger('bot')
-logger.setLevel(logging.INFO)
-logger.propagate = False
-
-# Remove any existing handlers
-for handler in logger.handlers[:]:
-    logger.removeHandler(handler)
-
-# Add file handler only
-handler = logging.FileHandler(
-    filename=os.path.join(LOG_DIR, 'discord.log'),
-    encoding='utf-8',
-    mode='a'
-)
-handler.setFormatter(logging.Formatter(
-    '%(asctime)s:%(levelname)s:%(name)s: %(message)s'
-))
-logger.addHandler(handler)
-
 # Ensure required directories exist
 os.makedirs(DATABASE_DIR, exist_ok=True)
 os.makedirs(LOG_DIR, exist_ok=True)
 
+# Setup cog-specific logger
+logger = logging.getLogger('vanityrole')
+if not logger.handlers:
+    logger.setLevel(logging.INFO)
+    handler = logging.FileHandler(
+        filename=os.path.join(LOG_DIR, 'vanityrole.log'),
+        encoding='utf-8',
+        mode='a'
+    )
+    handler.setFormatter(logging.Formatter('%(asctime)s:%(levelname)s:%(name)s: %(message)s'))
+    logger.addHandler(handler)
+
 
 class StatusManager(commands.Cog):
-    def __init__(self, bot):
+    """
+    A cog for managing vanity roles based on user status.
+    Required intents: members, presences
+    """
+
+    def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.db_path = os.path.join(DATABASE_DIR, "vanityroles.db")
-        self.rate_limits: DefaultDict[int, DefaultDict[int, int]] = defaultdict(lambda: defaultdict(int))
-        self.last_check: Dict[int, float] = {}
-        self.pending_role_changes: DefaultDict[int, List] = defaultdict(list)
-        self.member_role_states: DefaultDict[str, bool] = defaultdict(bool)
-        self.session: Optional[aiohttp.ClientSession] = None
+        self.rate_limits = defaultdict(dict)  # {guild_id: {member_id: last_action_timestamp}}
+        self.last_check = {}  # {guild_id: last_check_timestamp}
+        self.member_role_states = {}  # {f"{guild_id}:{member_id}": bool}
+        self.session: aiohttp.ClientSession | None = None
 
-        # Setup database and start tasks
+        if not (self.bot.intents.members and self.bot.intents.presences):
+            logger.error("Missing required intents: members and presences must be enabled")
+            raise RuntimeError("StatusManager requires members and presences intents")
+
+        # Setup the database asynchronously
         asyncio.create_task(self.setup_database())
-        self.start_checker.start()
         logger.info("StatusManager cog initialized")
 
     async def cog_load(self):
-        self.session = aiohttp.ClientSession()
-        logger.info("Cog loaded successfully")
+        try:
+            self.session = aiohttp.ClientSession()
+            self.start_checker.start()  # Start the status-check loop
+            logger.info("Cog loaded successfully and status checker started")
+        except Exception as e:
+            logger.error(f"Failed to initialize cog: {e}")
+            raise
 
     async def cog_unload(self):
-        self.start_checker.cancel()
-        if self.session:
-            await self.session.close()
-        logger.info("StatusManager cog unloaded")
-
-    async def send_error_webhook(self, error_message: str):
         try:
-            await self.bot.send_error_report(error_message)
-            logger.info("Error webhook sent successfully")
+            self.start_checker.cancel()  # Stop the loop
+            if self.session and not self.session.closed:
+                await self.session.close()
+            # Clear caches
+            self.rate_limits.clear()
+            self.last_check.clear()
+            self.member_role_states.clear()
+            logger.info("StatusManager cog unloaded successfully")
         except Exception as e:
-            logger.error(f"Failed to send error report: {e}")
+            logger.error(f"Error during cog unload: {e}")
 
-    @tasks.loop(seconds=60)
+    @tasks.loop(seconds=30)
     async def start_checker(self):
-        """Main status checking loop"""
         if not self.bot.is_ready():
             return
 
         try:
+            logger.info("Starting status check cycle")
             async with aiosqlite.connect(self.db_path) as db:
                 db.row_factory = aiosqlite.Row
                 async with db.execute("SELECT * FROM guild_configs") as cursor:
                     configs = await cursor.fetchall()
 
-            current_time = datetime.utcnow().timestamp()
+                if not configs:
+                    logger.debug("No guild configurations found")
+                    return
 
-            for config in configs:
-                guild_id = config['guild_id']
-                if current_time - self.last_check.get(guild_id, 0) < 60:
-                    continue
+                current_time = datetime.utcnow().timestamp()
+                for config in configs:
+                    guild_id = config["guild_id"]
+                    # Skip if we've checked this guild less than 30 seconds ago
+                    if current_time - self.last_check.get(guild_id, 0) < 30:
+                        continue
 
-                await self.check_guild_statuses(config)
-                self.last_check[guild_id] = current_time
+                    logger.debug(f"Processing guild {guild_id}")
+                    await self.check_guild_statuses(config)
+                    self.last_check[guild_id] = current_time
 
+            logger.info("Status check cycle completed")
         except Exception as e:
             logger.error(f"Status checker error: {e}", exc_info=True)
+            await self.send_error_webhook(f"Status checker error: {str(e)}")
+            await asyncio.sleep(60)
 
     @start_checker.before_loop
     async def before_checker(self):
@@ -110,85 +113,65 @@ class StatusManager(commands.Cog):
         logger.info("Status checker ready to start")
 
     async def check_guild_statuses(self, config):
-        """Process status checks for a single guild with improved rate limiting"""
-        guild_id = config['guild_id']
+        guild_id = config["guild_id"]
         guild = self.bot.get_guild(guild_id)
 
         if not guild:
             logger.warning(f"Could not find guild {guild_id}")
             return
 
-        role = guild.get_role(config['role_id'])
+        role = guild.get_role(config["role_id"])
         if not role:
             logger.warning(f"Could not find role {config['role_id']} in guild {guild_id}")
             return
 
-        # Batch process members with improved rate limiting
-        batch_size = 10
-        current_batch = []
-        current_time = datetime.utcnow().timestamp()
+        if not await self.verify_permissions(guild, role):
+            return
 
+        current_time = datetime.utcnow().timestamp()
         for member in guild.members:
             if member.bot:
                 continue
 
-            # Check rate limiting with shorter cooldown
-            last_update = self.rate_limits[guild_id].get(member.id, 0)
-            if current_time - last_update < 15:  # Reduced from 30 to 15 seconds
+            # Check if the member is manageable by the bot by comparing role positions.
+            if member.top_role >= guild.me.top_role:
+                logger.warning(
+                    f"Skipping member {member.name} because their highest role "
+                    f"({member.top_role.name}) is equal or higher than the bot's highest role "
+                    f"({guild.me.top_role.name})."
+                )
                 continue
 
             member_key = f"{guild_id}:{member.id}"
             current_has_role = role in member.roles
 
-            # Skip if state hasn't changed
-            if member_key in self.member_role_states and self.member_role_states[member_key] == current_has_role:
+            # Rate-limit role changes to one per minute per member.
+            if (member.id in self.rate_limits.get(guild_id, {}) and
+                    current_time - self.rate_limits[guild_id].get(member.id, 0) < 60):
                 continue
 
-            current_batch.append(member)
-
-            if len(current_batch) >= batch_size:
-                await self._process_member_batch(current_batch, role, config, current_time)
-                current_batch = []
-                await asyncio.sleep(0.5)  # Reduced delay between batches
-
-        # Process remaining members
-        if current_batch:
-            await self._process_member_batch(current_batch, role, config, current_time)
-
-    async def _process_member_batch(self, members, role, config, current_time):
-        """Process a batch of members for role updates"""
-        for member in members:
             try:
-                guild_id = config['guild_id']
-                member_key = f"{guild_id}:{member.id}"
-                current_has_role = role in member.roles
+                # Check for a custom status in the member's activities.
+                status_text = ""
+                for activity in member.activities:
+                    if isinstance(activity, discord.CustomActivity) and activity.name:
+                        status_text = activity.name
+                        break
 
-                # Handle offline members
-                if member.status == discord.Status.offline:
-                    if current_has_role:
-                        await member.remove_roles(role, reason="Member went offline")
-                        await self.log_role_change(guild_id, config['log_channel_id'], member, role, "removed")
-                        self.rate_limits[guild_id][member.id] = int(current_time)
-                        self.member_role_states[member_key] = False
-                    continue
-
-                # Check custom status for active members
-                status_text = None
-                if member.activity and isinstance(member.activity, discord.CustomActivity):
-                    status_text = member.activity.name or ""
-
-                should_have_role = bool(status_text and config['status_word'].lower() in status_text.lower())
+                # Determine if the status starts with the configured status word.
+                expected_prefix = f"/{config['status_word'].lower()}"
+                should_have_role = bool(status_text and status_text.lower().startswith(expected_prefix))
 
                 if should_have_role != current_has_role:
                     try:
                         if should_have_role:
                             await member.add_roles(role, reason="Status match detected")
-                            await self.log_role_change(guild_id, config['log_channel_id'], member, role, "added")
+                            await self.log_role_change(guild_id, config["log_channel_id"], member, role, "added")
                         else:
                             await member.remove_roles(role, reason="Status no longer matches")
-                            await self.log_role_change(guild_id, config['log_channel_id'], member, role, "removed")
+                            await self.log_role_change(guild_id, config["log_channel_id"], member, role, "removed")
 
-                        self.rate_limits[guild_id][member.id] = int(current_time)
+                        self.rate_limits[guild_id][member.id] = current_time
                         self.member_role_states[member_key] = should_have_role
 
                     except discord.Forbidden:
@@ -197,30 +180,72 @@ class StatusManager(commands.Cog):
                         logger.error(f"HTTP error updating role for {member.name}: {e}")
                     except Exception as e:
                         logger.error(f"Failed to update role for member {member.name}: {e}")
-
             except Exception as e:
                 logger.error(f"Error processing member {member.name}: {e}")
 
-            await asyncio.sleep(0.1)  # Small delay between members within batch
+            await asyncio.sleep(0.1)
 
-    async def setup_database(self):
-        """Initialize the SQLite database"""
+    async def verify_permissions(self, guild: discord.Guild, role: discord.Role) -> bool:
+        if not guild.me.guild_permissions.manage_roles:
+            logger.error(f"Missing Manage Roles permission in guild {guild.name}")
+            await self.send_error_webhook(f"Missing Manage Roles permission in guild {guild.name}")
+            return False
+
+        if role >= guild.me.top_role:
+            logger.error(f"Cannot manage role {role.name} due to hierarchy in {guild.name}")
+            await self.send_error_webhook(f"Role hierarchy issue in guild {guild.name}")
+            return False
+
+        return True
+
+    async def log_role_change(self, guild_id: int, channel_id: int, user: discord.Member, role: discord.Role, action: str):
         try:
-            async with aiosqlite.connect(self.db_path) as db:
-                await db.execute('''
-                    CREATE TABLE IF NOT EXISTS guild_configs (
-                        guild_id INTEGER PRIMARY KEY,
-                        guild_name TEXT,
-                        status_word TEXT,
-                        role_id INTEGER,
-                        log_channel_id INTEGER
-                    )
-                ''')
-                await db.commit()
-                logger.info("Database setup completed successfully")
+            channel = self.bot.get_channel(channel_id)
+            if not channel:
+                logger.error(f"Could not find log channel {channel_id}")
+                await self.send_error_webhook(f"Log channel not found in guild {guild_id}")
+                return
+
+            if not channel.permissions_for(channel.guild.me).send_messages:
+                logger.error(f"Missing permissions to send messages in channel {channel_id}")
+                await self.send_error_webhook(f"Missing send message permissions in log channel for guild {guild_id}")
+                return
+
+            if action == "added":
+                title = "Vanity Added"
+                description = (
+                    f"<a:sukoon_white_bo:1335856241011855430> {user.mention}! You've been granted the {role.mention} role. "
+                    "Enjoy your time with us and make the most out of your stay!"
+                )
+            else:
+                title = "Vanity Removed"
+                description = (
+                    f"<a:sukoon_yflower:1323990499660664883> {user.mention} Your {role.mention} role has been removed. "
+                    "We'll miss you in that role, but we hope to see you back soon!"
+                )
+
+            embed = discord.Embed(
+                title=title,
+                description=description,
+                color=discord.Color.from_str('#2f3136'),
+                timestamp=datetime.utcnow()
+            )
+            embed.set_thumbnail(url=user.display_avatar.url)
+
+            guild_obj = self.bot.get_guild(guild_id)
+            if guild_obj:
+                guild_icon = guild_obj.icon.url if guild_obj.icon else None
+                embed.set_footer(
+                    text=guild_obj.name,
+                    icon_url=guild_icon or self.bot.user.display_avatar.url
+                )
+
+            await channel.send(embed=embed)
+            logger.info(f"Role change logged for user {user.id} in guild {guild_id}")
+
         except Exception as e:
-            logger.error(f"Database setup failed: {e}")
-            raise
+            logger.error(f"Failed to log role change: {e}")
+            await self.send_error_webhook(f"Failed to log role change in guild {guild_id}: {str(e)}")
 
     @app_commands.command(name="vanity-setup")
     @app_commands.default_permissions(administrator=True)
@@ -231,7 +256,9 @@ class StatusManager(commands.Cog):
         role: discord.Role,
         log_channel: discord.TextChannel
     ):
-        """Setup the vanity role monitoring configuration for this server"""
+        """
+        Set up the vanity role monitoring configuration for this server.
+        """
         try:
             await interaction.response.defer(ephemeral=True)
 
@@ -255,6 +282,16 @@ class StatusManager(commands.Cog):
                 await interaction.followup.send(embed=embed, ephemeral=True)
                 return
 
+            if not log_channel.permissions_for(interaction.guild.me).send_messages:
+                embed = discord.Embed(
+                    title="❌ Channel Access Required",
+                    description=f"I don't have permission to send messages in {log_channel.mention}!",
+                    color=discord.Color.red()
+                )
+                embed.set_footer(text="Missing Permissions", icon_url=self.bot.user.display_avatar.url)
+                await interaction.followup.send(embed=embed, ephemeral=True)
+                return
+
             async with aiosqlite.connect(self.db_path) as db:
                 await db.execute(
                     """
@@ -263,7 +300,7 @@ class StatusManager(commands.Cog):
                     VALUES (?, ?, ?, ?, ?)
                     """,
                     (
-                        interaction.guild_id,
+                        interaction.guild.id,
                         interaction.guild.name,
                         status_word,
                         role.id,
@@ -276,91 +313,75 @@ class StatusManager(commands.Cog):
                 title="✨ Setup Complete!",
                 description=(
                     f"Configuration saved successfully, {interaction.user.mention}!\n"
-                    "Your status role system is now ready to use."
+                    f"• Status word: `{status_word}`\n"
+                    f"• Role: {role.mention}\n"
+                    f"• Log channel: {log_channel.mention}\n\n"
+                    "The bot will now automatically manage roles based on user statuses."
                 ),
                 color=discord.Color.green()
             )
-            embed.set_thumbnail(url=interaction.user.display_avatar.url)
-            embed.set_footer(text="Status Role Bot • Configuration Saved", icon_url=self.bot.user.display_avatar.url)
+            embed.set_thumbnail(url=interaction.guild.icon.url if interaction.guild.icon else self.bot.user.display_avatar.url)
+            guild_icon = interaction.guild.icon.url if interaction.guild.icon else self.bot.user.display_avatar.url
+            embed.set_footer(
+                text=interaction.guild.name,
+                icon_url=guild_icon
+            )
             await interaction.followup.send(embed=embed, ephemeral=True)
             logger.info(f"Configuration updated for guild: {interaction.guild.name}")
 
         except Exception as e:
-            logger.error(f"Setup command error: {e}")
+            logger.error(f"Setup command error: {e}", exc_info=True)
             embed = discord.Embed(
                 title="❌ Setup Failed",
-                description=(
-                    "An error occurred while saving your configuration.\n"
-                    "Please try setting up the status role again."
-                ),
+                description="An error occurred while saving your configuration.",
                 color=discord.Color.red()
             )
             embed.set_footer(text="Error • Setup Failed", icon_url=self.bot.user.display_avatar.url)
             await interaction.followup.send(embed=embed, ephemeral=True)
+            await self.send_error_webhook(f"Setup failed in guild {interaction.guild.id}: {str(e)}")
 
-    @app_commands.command(name="vanity-check")
-    async def help(self, interaction: discord.Interaction):
-        """Display help information about vanity role management"""
-        embed = discord.Embed(
-            title="🎭 Vanity Role Bot Guide",
-            color=discord.Color.blue(),
-            description="Automatically manage roles based on user status!"
-        )
-
-        embed.add_field(
-            name="📝 Setup Command",
-            value=(
-                "**/vanity-setup** (Admin only)\n"
-                "Configure the vanity role system with:\n"
-                "• `status_word`: Keyword to track in status\n"
-                "• `role`: Role to assign/remove\n"
-                "• `log_channel`: Channel for notifications"
-            ),
-            inline=False
-        )
-
-        embed.set_footer(text="Made with ❤️ | Vanity Role Bot", icon_url=self.bot.user.display_avatar.url)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-
-    async def log_role_change(self, guild_id: int, channel_id: int, user: discord.Member, role: discord.Role, action: str):
-        """Log role changes with detailed embed and proper timestamp"""
+    async def setup_database(self):
         try:
-            channel = self.bot.get_channel(channel_id)
-            if channel:
-                # Set appropriate title and color based on action
-                title = "Vanity Added!" if action == "added" else "Vanity Removed!"
-                color = discord.Color.from_str('#2f3136')  # Discord dark theme color
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute('''
+                    CREATE TABLE IF NOT EXISTS guild_configs (
+                        guild_id INTEGER PRIMARY KEY,
+                        guild_name TEXT,
+                        status_word TEXT,
+                        role_id INTEGER,
+                        log_channel_id INTEGER
+                    )
+                ''')
+                await db.commit()
+                logger.info("Database setup completed successfully")
 
-                # Create embed with proper styling
-                embed = discord.Embed(
-                    title=title,
-                    description=(
-                        f"<a:sukoon_white_bo:1335856241011855430> {user.mention}! You've been granted the {role.name} role. "
-                        "Enjoy your time with us and make the most out of your stay!"
-                    ) if action == "added" else (
-                        f"<a:sukoon_yflower:1323990499660664883> {user.mention} Your {role.name} role has been removed. "
-                        "We'll miss you in that role, but we hope to see you back soon!"
-                    ),
-                    color=color,
-                    timestamp=datetime.utcnow()  # Add timestamp to embed for discord's relative time
-                )
-
-                # Set user's avatar as thumbnail
-                embed.set_thumbnail(url=user.display_avatar.url)
-
-                guild = self.bot.get_guild(guild_id)
-
-                # Set footer with server icon and relative timestamp
-                footer_text = f"{guild.name}"
-                footer_icon = guild.icon.url if guild.icon else self.bot.user.display_avatar.url
-                embed.set_footer(text=footer_text, icon_url=footer_icon)
-
-                await channel.send(embed=embed)
-                logger.info(f"Role change logged for user {user.id} in guild {guild_id}")
-
+                async with db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='guild_configs'") as cursor:
+                    if await cursor.fetchone() is None:
+                        raise Exception("Failed to create guild_configs table")
         except Exception as e:
-            logger.error(f"Failed to log role change in guild {guild_id}: {e}")
+            logger.error(f"Database setup failed: {e}")
+            raise
 
-async def setup(bot):
+    async def send_error_webhook(self, error_message: str):
+        try:
+            webhook_url = os.getenv('WEBHOOK_URL')
+            if not webhook_url:
+                logger.error("Webhook URL not configured")
+                return
+
+            if not self.session or self.session.closed:
+                self.session = aiohttp.ClientSession()
+
+            async with self.session.post(webhook_url, json={'content': error_message}) as resp:
+                if resp.status != 204:
+                    text = await resp.text()
+                    logger.error(f"Failed to send webhook: {text}")
+                else:
+                    logger.info("Error webhook sent successfully")
+        except Exception as e:
+            logger.error(f"Failed to send error report: {e}")
+
+
+async def setup(bot: commands.Bot):
     await bot.add_cog(StatusManager(bot))
     logger.info("StatusManager cog loaded")
