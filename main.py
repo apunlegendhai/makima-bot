@@ -5,7 +5,6 @@ import os
 from dotenv import load_dotenv
 import asyncio
 import aiohttp
-from collections import defaultdict
 import sys
 from typing import Dict
 
@@ -43,10 +42,10 @@ class DiscordBot(commands.Bot):
     def __init__(self) -> None:
         intents = discord.Intents.default()
         intents.members = True
+        intents.presences = True  # Enable presences required by vanityrole cog
         intents.message_content = True
 
         super().__init__(command_prefix=".", intents=intents)
-        # Removed command usage functionality
         self.session: aiohttp.ClientSession = None
         self.command_locks: Dict[str, asyncio.Lock] = {}
         self.processing_commands: Dict[str, bool] = {}
@@ -98,7 +97,6 @@ class DiscordBot(commands.Bot):
     async def send_error_report(self, error_message: str) -> None:
         if not self.session:
             return
-
         try:
             async with self.session.post(WEBHOOK_URL, json={"content": error_message}) as response:
                 response.raise_for_status()
@@ -108,15 +106,12 @@ class DiscordBot(commands.Bot):
     async def process_commands(self, message):
         if message.author.bot:
             return
-
         ctx = await self.get_context(message)
         if ctx.command is None:
             return
-
         command_key = f"{ctx.author.id}:{ctx.command.name}"
         if self.processing_commands.get(command_key, False):
             return
-
         try:
             self.processing_commands[command_key] = True
             await super().process_commands(message)
