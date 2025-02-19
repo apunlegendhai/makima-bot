@@ -2,14 +2,12 @@ import discord
 from discord.ext import commands
 import logging
 import os
-import json
 from dotenv import load_dotenv
 import asyncio
 import aiohttp
 from collections import defaultdict
-import aiofiles
 import sys
-from typing import Dict, DefaultDict
+from typing import Dict
 
 # Load environment variables
 load_dotenv()
@@ -20,7 +18,6 @@ WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 # Directory constants
 LOGS_DIR = "logs"
 DATABASE_DIR = "database"
-COMMAND_USAGE_FILE = os.path.join(DATABASE_DIR, "command_usage.json")
 
 def setup_directories() -> None:
     for directory in (LOGS_DIR, DATABASE_DIR):
@@ -49,7 +46,7 @@ class DiscordBot(commands.Bot):
         intents.message_content = True
 
         super().__init__(command_prefix=".", intents=intents)
-        self.command_usage: DefaultDict[str, int] = defaultdict(int)
+        # Removed command usage functionality
         self.session: aiohttp.ClientSession = None
         self.command_locks: Dict[str, asyncio.Lock] = {}
         self.processing_commands: Dict[str, bool] = {}
@@ -66,7 +63,7 @@ class DiscordBot(commands.Bot):
             "cogs.purge",
             "cogs.key_generator",
             "cogs.av",
-	    "cogs.vanityrole",
+            "cogs.vanityrole",
             "cogs.thread",
             "cogs.sticky",
             "cogs.reqrole",
@@ -74,6 +71,7 @@ class DiscordBot(commands.Bot):
         ]
 
     async def setup_hook(self) -> None:
+        # Set up aiohttp session and load cogs
         self.session = aiohttp.ClientSession()
         await self.load_cogs()
 
@@ -126,14 +124,17 @@ class DiscordBot(commands.Bot):
             self.processing_commands[command_key] = False
 
 class Bot(DiscordBot):
-    async def setup(self) -> None:
+    async def setup_hook(self) -> None:
+        # Call the parent's setup_hook to set up the session and load cogs
+        await super().setup_hook()
+
+        # Register commands and events here so they are only set up once.
         @self.command()
         @commands.cooldown(1, 3, commands.BucketType.user)
         async def ping(ctx):
             lock = await self.get_command_lock(ctx.author.id, ctx.command.name)
             if lock.locked():
                 return
-
             async with lock:
                 await ctx.send(f'<a:sukoon_greendot:1322894177775783997> Latency: {self.latency * 1000:.2f}ms')
 
@@ -179,7 +180,7 @@ def main():
         validate_environment()
 
         bot = Bot()
-        asyncio.run(bot.setup())
+        # Let bot.run handle the setup; setup_hook is automatically called.
         bot.run(DISCORD_TOKEN)
     except Exception as e:
         logging.critical(f"Critical error: {e}")
