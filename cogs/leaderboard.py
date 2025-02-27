@@ -251,7 +251,7 @@ class Statistics(commands.Cog):
             stats = await self.db.get_user_stats(str(ctx.guild.id), str(target.id))
 
             embed = discord.Embed(
-                title="📊 Message Statistics",
+                title="<a:003_bel:1344601355515330621> Message Statistics",
                 color=self.get_random_color()
             )
             embed.set_thumbnail(url=target.display_avatar.url)
