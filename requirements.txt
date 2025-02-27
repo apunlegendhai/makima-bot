@@ -1,10 +1,10 @@
 aiofiles==24.1.0
-aiohappyeyeballs==2.4.6  # Updated from 2.4.4
-aiohttp==3.11.12         # Updated from 3.11.11
+aiohappyeyeballs==2.4.6
+aiohttp==3.11.12
 aiohttp-retry==2.9.1
 aiosignal==1.3.2
-aiosqlite==0.21.0        # Updated from 0.17.0
-attrs==25.1.0            # Updated from 24.3.0
+aiosqlite==0.21.0
+attrs==25.1.0
 blinker==1.9.0
 cachetools==5.3.1
 certifi==2025.1.31
@@ -25,11 +25,11 @@ itsdangerous==2.2.0
 Jinja2==3.1.5
 kiwisolver==1.4.8
 MarkupSafe==3.0.2
-matplotlib==3.10.0
+matplotlib==3.10.0  # Removed duplicate 3.5.0
 motor==3.5.3
 multidict==6.1.0
 numpy==2.2.1
-oauthlib==3.2.2          # Newly added
+oauthlib==3.2.2
 packaging==24.2
 pillow==11.0.0
 propcache==0.2.1
@@ -53,5 +53,4 @@ urllib3==2.3.0
 Werkzeug==3.1.3
 yarl==1.18.3
 backoff==1.10.0
-matplotlib==3.5.0
 seaborn==0.11.0
