@@ -25,7 +25,8 @@ itsdangerous==2.2.0
 Jinja2==3.1.5
 kiwisolver==1.4.8
 MarkupSafe==3.0.2
-matplotlib==3.10.0  # Removed duplicate 3.5.0
+setuptools>=65.5.0    # Added for distutils support
+matplotlib==3.10.0
 motor==3.5.3
 multidict==6.1.0
 numpy==2.2.1
