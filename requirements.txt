@@ -29,7 +29,7 @@ setuptools>=65.5.0    # Added for distutils support
 matplotlib==3.8.2
 motor==3.5.3
 multidict==6.1.0
-numpy==2.2.1
+numpy<2  # Fixed conflict by allowing a compatible NumPy version
 oauthlib==3.2.2
 packaging==24.2
 pillow==11.0.0
