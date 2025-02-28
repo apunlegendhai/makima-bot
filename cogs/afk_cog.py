@@ -1,217 +1,486 @@
 import discord
 from discord.ext import commands, tasks
-from datetime import datetime, timedelta
-from motor.motor_asyncio import AsyncIOMotorClient
+from datetime import datetime, timedelta, timezone
+from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase, AsyncIOMotorCollection
 from dotenv import load_dotenv
 import os
+import asyncio
+from typing import Optional, Tuple, Dict, Any, List, Union
+import logging
+import random
 
-# Load environment variables from .env file
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Load environment variables
 load_dotenv()
 
-class AFK(commands.Cog):
-    def __init__(self, bot):
+class DatabaseError(Exception):
+    """Custom exception for database-related errors."""
+    pass
+
+class MentionPaginator(discord.ui.View):
+    """
+    A paginator that shows one mention per page, with:
+      • Title: "Mentions from {mentioner_name}"
+      • Description: Contains:
+            - A clickable "[Jump to Message](...)" link,
+            - "When: {relative_time}" computed from the mention timestamp,
+            - "Message: {msg_content}" from the stored message.
+      • Thumbnail: The mentioner’s avatar (if available)
+      • embed.timestamp is set dynamically so Discord displays the current time in the corner.
+      • Footer: Displays the bot’s name.
+      • Uses a random non‑repeating color from a 30‑color pool for each page.
+    """
+    def __init__(self, mentions: List[Dict[str, Any]], author: discord.Member, bot: commands.Bot):
+        super().__init__(timeout=180)  # 3-minute timeout
         self.bot = bot
-        self.mongo_uri = os.getenv("MONGO_URL")  # Load MongoDB URI from environment variables
-        self.database_name = "discord_bot"  # Name of your database
-        self.collection_name = "afk"  # Name of your collection
-        self.db_client = None  # MongoDB client
-        self.db = None  # Reference to the database
-        self.afk_collection = None  # Reference to the AFK collection
-        self._cache = {}  # Cache for AFK statuses
-        self.cache_expiry_duration = timedelta(hours=24)  # Cache expires after 24 hours
+        self.author = author
+        self.mentions = mentions
+        self.current_page = 0
+        self.total_pages = len(mentions)
+        self.message: Optional[discord.Message] = None
 
-    async def init_db(self):
-        """Initialize MongoDB connection and ensure the collection exists."""
+        # Predefined pool of 30 unique colors
+        color_pool = [
+            0xFF5733, 0x33FF57, 0x3357FF, 0xFF33A1, 0xA133FF, 0x33FFA1, 0xA1FF33,
+            0x5733FF, 0xFF8C33, 0x8C33FF, 0x33FF8C, 0xFFC733, 0x33C7FF, 0xC733FF,
+            0xFF3366, 0x66FF33, 0x3366FF, 0xFFCC33, 0xCC33FF, 0x33FFCC, 0xFF3399,
+            0x99FF33, 0x3399FF, 0xFF6633, 0x6633FF, 0x33FF66, 0xFF9933, 0x9933FF,
+            0x66CCFF, 0xCCFF66
+        ]
+        if self.total_pages <= len(color_pool):
+            self.colors = random.sample(color_pool, self.total_pages)
+        else:
+            self.colors = random.sample(color_pool, len(color_pool))
+            extra_needed = self.total_pages - len(color_pool)
+            self.colors += random.choices(color_pool, k=extra_needed)
+
+    @staticmethod
+    def format_time_ago(diff: timedelta) -> str:
+        """Return a human-readable relative time (e.g. '5m ago') given a timedelta."""
+        seconds = int(diff.total_seconds())
+        if seconds < 60:
+            return f"{seconds}s ago"
+        minutes, seconds = divmod(seconds, 60)
+        if minutes < 60:
+            return f"{minutes}m ago"
+        hours, minutes = divmod(minutes, 60)
+        if hours < 24:
+            return f"{hours}h {minutes}m ago"
+        days, hours = divmod(hours, 24)
+        return f"{days}d {hours}h ago"
+
+    async def start(self, ctx: Union[discord.abc.Messageable, discord.Interaction]) -> None:
+        """Send the initial embed and attach this view."""
         try:
-            if not self.mongo_uri:
-                raise ValueError("MongoDB URI not found. Ensure MONGO_URL is set in your .env file.")
-
-            self.db_client = AsyncIOMotorClient(self.mongo_uri, serverSelectionTimeoutMS=5000)
-            # Test the connection
-            await self.db_client.server_info()
-            self.db = self.db_client[self.database_name]
-            self.afk_collection = self.db[self.collection_name]
-            print("MongoDB connected and collection initialized for afk cog.")
+            initial_embed = self.get_page_content()
+            if isinstance(ctx, discord.Interaction):
+                await ctx.response.send_message(
+                    content=f"{self.author.mention}, here's your AFK mention summary:",
+                    embed=initial_embed,
+                    view=self
+                )
+                self.message = await ctx.original_response()
+            else:
+                self.message = await ctx.send(
+                    content=f"{self.author.mention}, here's your AFK mention summary:",
+                    embed=initial_embed,
+                    view=self
+                )
         except Exception as e:
-            print(f"Failed to connect to MongoDB: {e}")
+            logger.error(f"Error starting paginator: {e}")
             raise
 
-    async def get_afk_status(self, user_id):
-        """Get the AFK status from the cache or MongoDB."""
-        if user_id in self._cache:
-            reason, timestamp = self._cache[user_id]
-            if datetime.utcnow() - timestamp > self.cache_expiry_duration:
-                del self._cache[user_id]  # Expired cache
-                return None
-            return reason, timestamp
+    def get_page_content(self) -> discord.Embed:
+        """Build the embed for the current mention."""
+        mention = self.mentions[self.current_page]
 
+        # Extract mention data
+        guild_id = mention["guild_id"]
+        channel_id = mention["channel_id"]
+        message_id = mention["message_id"]
+        created_at_str = mention["created_at"]
+        mentioner_id = mention["mentioned_by"]
+
+        # Construct jump-to-message URL
+        jump_url = f"https://discord.com/channels/{guild_id}/{channel_id}/{message_id}"
+
+        # Convert timestamp from ISO to datetime (ensure timezone aware)
         try:
+            mention_time = datetime.fromisoformat(created_at_str)
+            if mention_time.tzinfo is None:
+                mention_time = mention_time.replace(tzinfo=timezone.utc)
+        except ValueError:
+            mention_time = datetime.now(timezone.utc)
+
+        # Compute relative time based on the mention's timestamp
+        time_diff = datetime.now(timezone.utc) - mention_time
+        relative_time = self.format_time_ago(time_diff)
+
+        # Fetch the mentioner (fallback to raw mention if not found)
+        mentioner = self.bot.get_user(mentioner_id)
+        mentioner_name = mentioner.display_name if mentioner else f"<@{mentioner_id}>"
+
+        # Retrieve message content (if available)
+        msg_content = mention.get("message_content", "No content provided.")
+
+        # Select the unique color for this page
+        embed_color = self.colors[self.current_page]
+
+        # Build the embed description
+        description = f"[Jump to Message]({jump_url})\nWhen: {relative_time}\nMessage: {msg_content}"
+        embed = discord.Embed(
+            title=f"Mentions from {mentioner_name}",
+            description=description,
+            color=embed_color
+        )
+
+        # Set embed.timestamp to current time for dynamic display in Discord's UI
+        embed.timestamp = datetime.now(timezone.utc)
+
+        # Set footer to show only the bot's name (the dynamic timestamp will be shown automatically)
+        if self.bot.user and self.bot.user.avatar:
+            embed.set_footer(text=f"{self.bot.user.name}", icon_url=self.bot.user.avatar.url)
+        else:
+            embed.set_footer(text=f"{self.bot.user.name}")
+
+        # Thumbnail: mentioner's avatar (if available)
+        if mentioner and mentioner.avatar:
+            embed.set_thumbnail(url=mentioner.avatar.url)
+
+        return embed
+
+    @discord.ui.button(label="Previous", style=discord.ButtonStyle.gray, disabled=True)
+    async def prev_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Show the previous mention."""
+        if interaction.user.id != self.author.id:
+            return await interaction.response.send_message("You cannot use these controls.", ephemeral=True)
+        self.current_page = max(0, self.current_page - 1)
+        await self._update_buttons()
+        await interaction.response.edit_message(embed=self.get_page_content(), view=self)
+
+    @discord.ui.button(label="Next", style=discord.ButtonStyle.gray)
+    async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Show the next mention."""
+        if interaction.user.id != self.author.id:
+            return await interaction.response.send_message("You cannot use these controls.", ephemeral=True)
+        self.current_page = min(self.total_pages - 1, self.current_page + 1)
+        await self._update_buttons()
+        await interaction.response.edit_message(embed=self.get_page_content(), view=self)
+
+    async def _update_buttons(self):
+        """Enable or disable navigation buttons based on the current page."""
+        self.children[0].disabled = self.current_page == 0
+        self.children[1].disabled = self.current_page == (self.total_pages - 1)
+
+    async def on_timeout(self):
+        """Disable all buttons when the view times out."""
+        for child in self.children:
+            child.disabled = True
+        try:
+            if self.message and self.message.embeds:
+                embed = self.message.embeds[0]
+                embed.set_footer(text=f"Page {self.current_page + 1}/{self.total_pages} • Navigation timed out")
+                await self.message.edit(embed=embed, view=self)
+        except Exception as e:
+            logger.error(f"Error on timeout: {e}")
+
+class AFK(commands.Cog):
+    """AFK cog that handles AFK status, recording mentions, and sending a mention summary upon return."""
+    def __init__(self, bot: commands.Bot):
+        self.bot = bot
+        self.mongo_uri: str = os.getenv("MONGO_URL", "")
+        self.database_name: str = "discord_bot"
+        self.collection_name: str = "afk"
+        self.mentions_collection_name: str = "afk_mentions"
+        self.db_client: Optional[AsyncIOMotorClient] = None
+        self.db: Optional[AsyncIOMotorDatabase] = None
+        self.afk_collection: Optional[AsyncIOMotorCollection] = None
+        self.mentions_collection: Optional[AsyncIOMotorCollection] = None
+
+        # Cache: user_id -> (reason, timestamp)
+        self._cache: Dict[int, Tuple[str, datetime]] = {}
+        self.cache_expiry_duration: timedelta = timedelta(hours=1)
+        self.connection_retry_delay: int = 5
+        self.max_reason_length: int = 100
+        self.mention_retention_days: int = 7
+        self.tasks_started = False
+
+    async def init_db(self) -> None:
+        """Initialize MongoDB connection with retry logic."""
+        retries = 3
+        for attempt in range(retries):
+            try:
+                if not self.mongo_uri:
+                    raise DatabaseError("MongoDB URI not found in environment variables")
+
+                self.db_client = AsyncIOMotorClient(
+                    self.mongo_uri,
+                    serverSelectionTimeoutMS=5000,
+                    connectTimeoutMS=5000,
+                    retryWrites=True
+                )
+                await self.db_client.server_info()
+
+                self.db = self.db_client[self.database_name]
+                self.afk_collection = self.db[self.collection_name]
+                self.mentions_collection = self.db[self.mentions_collection_name]
+
+                await self.afk_collection.create_index("user_id", unique=True)
+                await self.mentions_collection.create_index([("user_id", 1), ("created_at", 1)])
+                logger.info("MongoDB connection established successfully")
+                return
+            except Exception as e:
+                logger.error(f"Database connection attempt {attempt + 1} failed: {e}")
+                if attempt < retries - 1:
+                    await asyncio.sleep(self.connection_retry_delay)
+                else:
+                    raise DatabaseError(f"Failed to connect to MongoDB after {retries} attempts")
+
+    def start_tasks(self) -> None:
+        """Start background tasks once the database is initialized."""
+        if not self.tasks_started:
+            self.clean_cache.start()
+            self.cleanup_mentions.start()
+            self.tasks_started = True
+            logger.info("Background tasks started")
+
+    @tasks.loop(minutes=30)
+    async def clean_cache(self):
+        """Clean expired entries from the AFK cache."""
+        try:
+            now = datetime.now(timezone.utc)
+            expired_keys = [
+                key for key, (_, timestamp) in self._cache.items()
+                if now - timestamp > self.cache_expiry_duration
+            ]
+            for key in expired_keys:
+                del self._cache[key]
+            if expired_keys:
+                logger.info(f"Cleaned {len(expired_keys)} expired cache entries")
+        except Exception as e:
+            logger.error(f"Error cleaning cache: {e}")
+
+    @tasks.loop(hours=12)
+    async def cleanup_mentions(self):
+        """Delete old mention records from the database."""
+        try:
+            if self.mentions_collection is None:
+                logger.warning("Mentions collection not initialized; skipping cleanup")
+                return
+            cutoff = datetime.now(timezone.utc) - timedelta(days=self.mention_retention_days)
+            result = await self.mentions_collection.delete_many({
+                "created_at": {"$lt": cutoff.isoformat()}
+            })
+            if result.deleted_count:
+                logger.info(f"Cleaned up {result.deleted_count} old mention records")
+        except Exception as e:
+            logger.error(f"Error in cleanup_mentions: {e}")
+
+    async def get_afk_status(self, user_id: int) -> Optional[Tuple[str, datetime]]:
+        """Retrieve a user's AFK status, checking cache first."""
+        try:
+            if user_id in self._cache:
+                reason, ts = self._cache[user_id]
+                if datetime.now(timezone.utc) - ts <= self.cache_expiry_duration:
+                    return reason, ts
+                del self._cache[user_id]
+
             result = await self.afk_collection.find_one({"user_id": user_id})
             if result:
                 reason = result["reason"]
                 timestamp = datetime.fromisoformat(result["timestamp"])
-                self._cache[user_id] = (reason, timestamp)  # Update cache
+                if timestamp.tzinfo is None:
+                    timestamp = timestamp.replace(tzinfo=timezone.utc)
+                self._cache[user_id] = (reason, timestamp)
                 return reason, timestamp
+            return None
         except Exception as e:
-            print(f"Error fetching AFK status for {user_id}: {e}")
-        return None
+            logger.error(f"Error fetching AFK status for {user_id}: {e}")
+            return None
 
-    async def set_afk_status(self, user_id, reason):
-        """Set the AFK status in MongoDB and cache."""
-        timestamp = datetime.utcnow().isoformat()
+    async def set_afk_status(self, user_id: int, reason: str) -> bool:
+        """Set or update a user's AFK status."""
         try:
+            reason = discord.utils.escape_markdown(reason.strip())[:self.max_reason_length]
+            now = datetime.now(timezone.utc)
             await self.afk_collection.update_one(
                 {"user_id": user_id},
-                {"$set": {"reason": reason, "timestamp": timestamp}},
-                upsert=True,
+                {"$set": {
+                    "reason": reason,
+                    "timestamp": now.isoformat(),
+                    "updated_at": now.isoformat()
+                }},
+                upsert=True
             )
-            self._cache[user_id] = (reason, datetime.utcnow())
+            self._cache[user_id] = (reason, now)
+            return True
         except Exception as e:
-            print(f"Error setting AFK status for {user_id}: {e}")
+            logger.error(f"Error setting AFK status for {user_id}: {e}")
+            return False
 
-    async def remove_afk_status(self, user_id):
-        """Remove AFK status from MongoDB and cache."""
+    async def remove_afk_status(self, user_id: int) -> bool:
+        """Remove a user's AFK status."""
         try:
-            await self.afk_collection.delete_one({"user_id": user_id})
+            result = await self.afk_collection.delete_one({"user_id": user_id})
             self._cache.pop(user_id, None)
+            return result.deleted_count > 0
         except Exception as e:
-            print(f"Error removing AFK status for {user_id}: {e}")
+            logger.error(f"Error removing AFK status for {user_id}: {e}")
+            return False
 
     @commands.command()
-    async def afk(self, ctx, *, reason: str = "AFK"):
-        """Set yourself as AFK with an optional reason."""
-        reason = reason[:100]  # Limit reason to 100 characters
-        reason = discord.utils.escape_markdown(reason)  # Escape markdown for safety
-        user_id = ctx.author.id
-        await self.set_afk_status(user_id, reason)
-
-        embed = discord.Embed(
-            description=f"<:sukoon_info:1323251063910043659> | Successfully set your AFK status with reason: {reason}",
-            color=0x2f3136,
-        )
-        await ctx.send(embed=embed)
+    async def afk(self, ctx: commands.Context, *, reason: str = "AFK"):
+        """Command to set your AFK status with an optional reason."""
+        try:
+            success = await self.set_afk_status(ctx.author.id, reason)
+            if success:
+                embed = discord.Embed(
+                    description=f"Your AFK status has been set: **{reason}**",
+                    color=0x2f3136
+                )
+                await ctx.send(embed=embed)
+            else:
+                raise commands.CommandError("Failed to set AFK status")
+        except Exception as e:
+            logger.error(f"Error in afk command: {e}")
+            await ctx.send("An error occurred while setting your AFK status. Please try again later.")
 
     @commands.Cog.listener()
-    async def on_message(self, message):
-        """Handle incoming messages to check or clear AFK statuses."""
+    async def on_message(self, message: discord.Message):
+        """Check messages for mentions of AFK users and handle AFK returns."""
         if message.author.bot:
             return
 
         ctx = await self.bot.get_context(message)
         if ctx.valid:
-            return  # Skip processing if it's a command
+            return
 
         try:
-            result = await self.get_afk_status(message.author.id)
-            if result:
-                reason, timestamp = result
-                await self.remove_afk_status(message.author.id)
+            if message.mentions:
+                await self._handle_mentions(message)
+            await self._handle_afk_return(message)
+        except Exception as e:
+            logger.error(f"Error in on_message: {e}")
 
-                time_diff = datetime.utcnow() - timestamp
-                time_ago = self.format_time_ago(time_diff)
-
+    async def _handle_mentions(self, message: discord.Message):
+        """Record a mention if the mentioned user is AFK."""
+        for mention in message.mentions:
+            if mention.bot:
+                continue
+            afk_status = await self.get_afk_status(mention.id)
+            if afk_status:
+                reason, afk_timestamp = afk_status
+                await self._record_mention(mention, message)
+                rel_time = self.clean_time_format(afk_timestamp)
                 embed = discord.Embed(
-                    description=f"<:sukoon_info:1323251063910043659> | Successfully removed your AFK. You were AFK for {time_ago}.",
-                    color=0x2f3136,
+                    description=f"{mention.mention} is AFK: {reason} ({rel_time})",
+                    color=0x2f3136
                 )
                 await message.channel.send(embed=embed)
 
-            if message.mentions:
-                for mention in message.mentions:
-                    result = await self.get_afk_status(mention.id)
-                    if result:
-                        reason, timestamp = result
-                        time_diff = datetime.utcnow() - timestamp
-                        time_ago = self.format_time_ago(time_diff)
+    def clean_time_format(self, timestamp: datetime) -> str:
+        """Return a human-friendly relative time string for a given timestamp."""
+        diff = datetime.now(timezone.utc) - timestamp
+        return MentionPaginator.format_time_ago(diff)
 
-                        embed = discord.Embed(
-                            description=f"<:sukoon_info:1323251063910043659> | {mention.mention} went AFK {time_ago} with reason: {reason}.",
-                            color=0x2f3136,
-                        )
-                        await message.channel.send(embed=embed)
-        except Exception as e:
-            print(f"Error processing on_message event: {e}")
+    async def _handle_afk_return(self, message: discord.Message):
+        """If a user who is AFK sends a message, remove their status and send a mention summary."""
+        afk_result = await self.get_afk_status(message.author.id)
+        if afk_result:
+            reason, afk_timestamp = afk_result
+            await self._send_return_message(message, afk_timestamp)
+            await self._send_mention_summary(message, afk_timestamp)
+            await self.remove_afk_status(message.author.id)
 
-        await self.bot.process_commands(message)
-
-    @commands.command()
-    async def afk_status(self, ctx, member: discord.Member = None):
-        """Check the AFK status of yourself or another member."""
-        member = member or ctx.author
+    async def _record_mention(self, mentioned_user: discord.Member, message: discord.Message):
+        """Record a mention of an AFK user in the database."""
         try:
-            result = await self.get_afk_status(member.id)
-
-            if result:
-                reason, timestamp = result
-                time_diff = datetime.utcnow() - timestamp
-                time_ago = self.format_time_ago(time_diff)
-
-                embed = discord.Embed(
-                    description=f"<:sukoon_info:1323251063910043659> {member.mention} is AFK. Reason: {reason}. AFK since: {time_ago}.",
-                    color=0x2f3136,
-                )
-                await ctx.send(embed=embed)
-            else:
-                embed = discord.Embed(
-                    description=f"<a:sukoon_reddot:1322894157794119732> | {member.mention} is not AFK.",
-                    color=0x2f3136,
-                )
-                await ctx.send(embed=embed)
+            data = {
+                "user_id": mentioned_user.id,
+                "message_id": message.id,
+                "channel_id": message.channel.id,
+                "guild_id": message.guild.id,
+                "mentioned_by": message.author.id,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "message_content": message.content[:200]
+            }
+            await self.mentions_collection.insert_one(data)
         except Exception as e:
-            print(f"Error fetching AFK status for {member.id}: {e}")
+            logger.error(f"Error recording mention for {mentioned_user.id}: {e}")
 
-    def format_time_ago(self, time_diff):
-        """Format a timedelta object into a human-readable 'time ago' string."""
-        seconds = time_diff.total_seconds()
-        minutes = seconds // 60
-        hours = minutes // 60
-        days = hours // 24
+    async def _send_return_message(self, message: discord.Message, afk_timestamp: datetime):
+        """Notify the user that they are no longer AFK."""
+        rel_time = self.clean_time_format(afk_timestamp)
+        embed = discord.Embed(
+            description=f"{message.author.mention} is no longer AFK. They were AFK since {rel_time}.",
+            color=0x2f3136
+        )
+        await message.channel.send(embed=embed)
 
-        if days > 0:
-            return f"{int(days)} days ago"
-        elif hours > 0:
-            return f"{int(hours)} hours ago"
-        elif minutes > 0:
-            return f"{int(minutes)} minutes ago"
-        else:
-            return f"{int(seconds)} seconds ago"
-
-    @commands.Cog.listener()
-    async def on_member_remove(self, member):
-        """Automatically remove AFK status if a user leaves the server."""
+    async def _send_mention_summary(self, message: discord.Message, afk_start_time: datetime):
+        """Send a paginated summary of mentions received while the user was AFK."""
         try:
-            await self.remove_afk_status(member.id)
-        except Exception as e:
-            print(f"Error removing AFK status for {member.id} on member remove: {e}")
+            if self.mentions_collection is None:
+                logger.error("Mentions collection is not initialized.")
+                return
 
-    @commands.Cog.listener()
-    async def on_member_join(self, member):
-        """Automatically remove AFK status when a user joins the server."""
-        try:
-            await self.remove_afk_status(member.id)
-        except Exception as e:
-            print(f"Error removing AFK status for {member.id} on member join: {e}")
+            mentions = await self.mentions_collection.find({
+                "user_id": message.author.id,
+                "created_at": {"$gte": afk_start_time.isoformat()}
+            }).to_list(length=None)
 
-    @tasks.loop(hours=1)
-    async def clean_cache(self):
-        """Periodically clean expired cache entries."""
-        now = datetime.utcnow()
-        expired_keys = [key for key, (_, timestamp) in self._cache.items() if now - timestamp > self.cache_expiry_duration]
-        for key in expired_keys:
-            del self._cache[key]
+            if not mentions:
+                logger.info(f"No mentions found for user {message.author.id} during AFK period.")
+                return
+
+            valid_mentions = []
+            for m in mentions:
+                if all(k in m for k in ["message_id", "channel_id", "guild_id", "mentioned_by", "created_at"]):
+                    valid_mentions.append(m)
+                else:
+                    logger.warning(f"Skipping invalid mention record: {m}")
+
+            if not valid_mentions:
+                logger.warning("No valid mentions after filtering.")
+                return
+
+            view = MentionPaginator(valid_mentions, message.author, self.bot)
+            try:
+                dm_channel = await message.author.create_dm()
+                await view.start(dm_channel)
+                logger.info(f"Sent mention summary to {message.author} via DM.")
+            except (discord.Forbidden, Exception):
+                logger.info(f"Falling back to channel for user {message.author.id}")
+                await view.start(message.channel)
+
+            await self.mentions_collection.delete_many({"user_id": message.author.id})
+        except Exception as e:
+            logger.error(f"Error in _send_mention_summary: {e}")
+            await message.channel.send("There was an error displaying your AFK mentions summary.", delete_after=10)
 
     async def cog_unload(self):
-        """Close the MongoDB client and clean up tasks."""
+        """Clean up background tasks and close the MongoDB connection when the cog unloads."""
         try:
-            if self.db_client:
+            if self.tasks_started:
+                self.clean_cache.cancel()
+                self.cleanup_mentions.cancel()
+            if self.db_client is not None:
                 self.db_client.close()
-            self.clean_cache.cancel()
+            logger.info("AFK cog unloaded successfully.")
         except Exception as e:
-            print(f"Error during cog unload: {e}")
+            logger.error(f"Error during cog unload: {e}")
 
-# Setup function to add the cog
-async def setup(bot):
-    cog = AFK(bot)
-    await cog.init_db()
-    cog.clean_cache.start()
-    await bot.add_cog(cog)
+async def setup(bot: commands.Bot):
+    """Initialize and load the AFK cog."""
+    try:
+        cog = AFK(bot)
+        await cog.init_db()
+        cog.start_tasks()
+        await bot.add_cog(cog)
+        logger.info("AFK cog loaded successfully.")
+    except Exception as e:
+        logger.error(f"Failed to load AFK cog: {e}")
+        raise
