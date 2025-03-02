@@ -1,3 +1,14 @@
+import matplotlib
+matplotlib.use('Agg')  # Use a non-interactive backend to avoid Tkinter errors
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+# Set the default font to one with broad Unicode support.
+matplotlib.rcParams['font.family'] = 'DejaVu Sans'
+
+import warnings
+# Suppress warnings about missing glyph 4048 (Tibetan mark)
+warnings.filterwarnings("ignore", message="Glyph 4048")
+
 import discord
 from discord.ext import commands, tasks
 from discord import app_commands
@@ -7,8 +18,6 @@ import logging
 import random
 import colorsys
 from datetime import datetime, timedelta
-import matplotlib.pyplot as plt
-import matplotlib.dates as mdates
 from io import BytesIO
 from dotenv import load_dotenv
 
@@ -51,7 +60,6 @@ class MongoDatabase:
         logging.info(f"MongoDB setup complete for database: {self.db_name}")
 
     async def update_message_count(self, guild_id: str, user_id: str):
-        # Use a datetime at midnight UTC
         today = datetime.combine(datetime.utcnow().date(), datetime.min.time())
         await self.daily_stats.update_one(
             {"guild_id": guild_id, "user_id": user_id, "date": today},
@@ -198,7 +206,8 @@ class StatsToggleView(discord.ui.View):
         self.update_buttons()
         stats = await self.cog.db.get_user_stats(str(interaction.guild.id), str(self.target.id))
         embed = self.cog.create_message_stats_embed(self.target, stats)
-        await interaction.response.edit_message(embed=embed, view=self)
+        # Clear any previous attachments (like the graph)
+        await interaction.response.edit_message(embed=embed, view=self, attachments=[])
 
     @discord.ui.button(label="Voice", style=discord.ButtonStyle.secondary, custom_id="voice_stats")
     async def voice_stats_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -208,16 +217,19 @@ class StatsToggleView(discord.ui.View):
         self.update_buttons()
         stats = await self.cog.db.get_user_stats(str(interaction.guild.id), str(self.target.id))
         embed = self.cog.create_voice_stats_embed(self.target, stats)
-        await interaction.response.edit_message(embed=embed, view=self)
+        # Clear any previous attachments
+        await interaction.response.edit_message(embed=embed, view=self, attachments=[])
 
     @discord.ui.button(label="Graph", style=discord.ButtonStyle.secondary, custom_id="graphical_stats")
     async def graphical_stats_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.user.id != self.target.id:
             return await interaction.response.send_message("This button isn't for you.", ephemeral=True)
+        # Defer the response to prevent the interaction token from expiring during graph generation.
+        await interaction.response.defer()
         self.current_mode = "graphical"
         self.update_buttons()
         embed, file = await self.cog.create_graphical_stats_embed(str(interaction.guild.id), self.target)
-        await interaction.response.edit_message(embed=embed, view=self, attachments=[file])
+        await interaction.edit_original_response(embed=embed, view=self, attachments=[file])
 
 
 # ------------------ Reset Activity Confirmation View ------------------
