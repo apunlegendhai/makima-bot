@@ -13,7 +13,7 @@ charset-normalizer==3.4.1
 click==8.1.8
 contourpy==1.3.1
 cycler==0.12.1
-discord.py==2.5.0
+discord.py==2.4.0
 Flask==3.1.0
 fonttools==4.55.3
 frozenlist==1.5.0
@@ -25,11 +25,11 @@ itsdangerous==2.2.0
 Jinja2==3.1.5
 kiwisolver==1.4.8
 MarkupSafe==3.0.2
-setuptools>=65.5.0
+setuptools>=65.5.0    # Added for distutils support
 matplotlib==3.8.2
 motor==3.5.3
 multidict==6.1.0
-numpy<2
+numpy<2  # Fixed conflict by allowing a compatible NumPy version
 oauthlib==3.2.2
 packaging==24.2
 pillow==11.0.0
