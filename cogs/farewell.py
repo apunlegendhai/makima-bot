@@ -217,16 +217,7 @@ class FarewellCog(commands.Cog):
             error_msg = f"Cannot send DM to {user.name} – DMs closed"
             logger.warning(error_msg)
             self._record_message(guild_id, success=False, error_type="dm_closed")
-
-            # Attempt to notify via the system channel if possible
-            if hasattr(user, "guild") and user.guild and user.guild.system_channel:
-                try:
-                    await user.guild.system_channel.send(
-                        f"⚠️ Unable to send farewell message to {user.mention} as their DMs are closed.",
-                        allowed_mentions=discord.AllowedMentions.none()
-                    )
-                except Exception as e:
-                    logger.error(f"Failed to send notification to system channel: {e}")
+            # Removed fallback: no message is sent to any channel.
             return False
 
         except Exception as e:
@@ -360,4 +351,4 @@ class FarewellCog(commands.Cog):
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(FarewellCog(bot))
-    
+            
