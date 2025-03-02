@@ -198,7 +198,7 @@ class StatsToggleView(discord.ui.View):
                 elif child.custom_id == "graphical_stats":
                     child.disabled = (self.current_mode == "graphical")
 
-    @discord.ui.button(label="Messages", style=discord.ButtonStyle.secondary, custom_id="message_stats")
+    @discord.ui.button(emoji="<a:sukooon_cha:1344706814616273010>", style=discord.ButtonStyle.secondary, custom_id="message_stats")
     async def message_stats_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.user.id != self.target.id:
             return await interaction.response.send_message("This button isn't for you.", ephemeral=True)
@@ -209,7 +209,7 @@ class StatsToggleView(discord.ui.View):
         # Clear any previous attachments (like the graph)
         await interaction.response.edit_message(embed=embed, view=self, attachments=[])
 
-    @discord.ui.button(label="Voice", style=discord.ButtonStyle.secondary, custom_id="voice_stats")
+    @discord.ui.button(emoji="<:sukooon_voic:1344707189851295876>", style=discord.ButtonStyle.secondary, custom_id="voice_stats")
     async def voice_stats_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.user.id != self.target.id:
             return await interaction.response.send_message("This button isn't for you.", ephemeral=True)
@@ -220,7 +220,7 @@ class StatsToggleView(discord.ui.View):
         # Clear any previous attachments
         await interaction.response.edit_message(embed=embed, view=self, attachments=[])
 
-    @discord.ui.button(label="Graph", style=discord.ButtonStyle.secondary, custom_id="graphical_stats")
+    @discord.ui.button(emoji="<:sukoon_statss:1344711129359847485>", style=discord.ButtonStyle.secondary, custom_id="graphical_stats")
     async def graphical_stats_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.user.id != self.target.id:
             return await interaction.response.send_message("This button isn't for you.", ephemeral=True)
