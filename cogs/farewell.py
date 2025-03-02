@@ -78,13 +78,12 @@ farewell_messages = [
     "We at Sukoon respect your choice to leave, but hope you'll choose to return!",
     "May new adventures bring you joy, and Sukoon welcome you back!",
     "This farewell from Sukoon doesn't have to be final. We'll be here!",
-    "Thanks for being part of Sukoon's story. There's always room for another chapter!",
-    "Until we meet again at Sukoon, take care and know you're welcome back anytime!"
+    "Thanks for being part of Sukoon's story. There's always room for another chapter!"
 ]
 
 class SukoonInviteView(discord.ui.View):
     def __init__(self):
-        super().__init__(timeout=None)  # Persistent view with no timeout
+        super().__init__(timeout=None)
         self.add_item(discord.ui.Button(
             style=discord.ButtonStyle.link,
             label="Return to Sukoon",
@@ -97,12 +96,13 @@ class FarewellCog(commands.Cog):
         self.bot = bot
         self.bot.add_view(SukoonInviteView())
         logger.info("Added persistent invite view")
-
         try:
             self.client = MongoClient(MONGO_URL)
             self.db = self.client.sukoon_bot
             self.analytics = self.db.farewell_analytics
             self.sent_messages = self.db.sent_messages
+            # New collection for guild configuration (farewell enabled/disabled)
+            self.configs = self.db.guild_configs
             logger.info("Successfully connected to MongoDB")
         except Exception as e:
             logger.error(f"Error connecting to MongoDB: {e}")
@@ -113,24 +113,31 @@ class FarewellCog(commands.Cog):
             self.client.close()
         logger.info("Cleaning up FarewellCog instance")
 
-    def _can_send_message(self, user_id: int) -> bool:
+    def is_farewell_enabled(self, guild_id) -> bool:
+        doc = self.configs.find_one({'_id': guild_id})
+        return doc.get('farewell_enabled', False) if doc else False
+
+    def _can_send_message(self, user: discord.User, guild_id) -> bool:
         try:
-            if self.sent_messages.find_one({'user_id': user_id}):
-                logger.info(f"User {user_id} already received a farewell message (database check)")
+            # Check if a farewell message for this user has already been sent in this guild
+            if self.sent_messages.find_one({'user_id': user.id, 'guild_id': guild_id}):
+                logger.info(f"User {user.id} already received a farewell message in guild {guild_id}")
                 return False
 
+            # Record that a farewell message has been sent for this user in this guild
             self.sent_messages.insert_one({
-                'user_id': user_id,
+                'user_id': user.id,
+                'guild_id': guild_id,
                 'timestamp': datetime.utcnow()
             })
-            logger.info(f"Recording new farewell message for user {user_id}")
+            logger.info(f"Recording farewell message for user {user.id} in guild {guild_id}")
             return True
 
         except Exception as e:
             logger.error(f"Error in _can_send_message: {e}")
             return False
 
-    def _record_message(self, success: bool, error_type: str = "unknown"):
+    def _record_message(self, guild_id, success: bool, error_type: str = "unknown"):
         today = datetime.utcnow().strftime('%Y-%m-%d')
         try:
             update = {
@@ -143,16 +150,16 @@ class FarewellCog(commands.Cog):
             if not success and error_type:
                 update['$inc'][f'errors.{error_type}'] = 1
 
-            # Update daily stats
+            # Update daily stats for this guild
             self.analytics.update_one(
-                {'date': today},
+                {'guild_id': guild_id, 'date': today},
                 update,
                 upsert=True
             )
 
-            # Update overall stats
+            # Update overall stats for this guild
             self.analytics.update_one(
-                {'_id': 'overall_stats'},
+                {'_id': f'overall_stats_{guild_id}'},
                 {
                     '$inc': {
                         'messages_sent': 1,
@@ -169,29 +176,47 @@ class FarewellCog(commands.Cog):
         except Exception as e:
             logger.error(f"Error recording analytics: {e}")
 
-    async def send_farewell_message(self, user: discord.User) -> bool:
-        logger.info(f"Processing farewell for {user.name} (ID: {user.id})")
-        if not self._can_send_message(user.id):
-            logger.info(f"Skipping farewell for {user.name} - already sent")
+    async def send_farewell_message(self, user: discord.User, guild: discord.Guild = None, force: bool = False) -> bool:
+        # Determine the guild ID from the passed guild or from the user (if Member)
+        guild_id = None
+        if guild:
+            guild_id = guild.id
+        elif isinstance(user, discord.Member):
+            guild_id = user.guild.id
+        else:
+            logger.warning("No guild information available; using 'global' as guild id.")
+            guild_id = "global"
+
+        # Only send farewell if the feature is enabled for this guild (unless forced via test command)
+        if not force and not self.is_farewell_enabled(guild_id):
+            logger.info(f"Farewell messages are disabled in guild {guild_id}. Skipping farewell for {user.name}.")
             return False
+
+        logger.info(f"Processing farewell for {user.name} (ID: {user.id}) in guild {guild_id}")
+        if not force:
+            if not self._can_send_message(user, guild_id):
+                logger.info(f"Skipping farewell for {user.name} in guild {guild_id} – already sent")
+                return False
+        else:
+            logger.info("Force sending farewell message, bypassing duplicate check.")
 
         try:
             message = (
                 f"{BORDER}\n\n"
                 f"Dear {user.mention},\n\n"
                 f"{random.choice(farewell_messages)}\n\n"
-                f"~Sukoon ♡\n\n"
+                f"~ Sukoon ♡\n\n"
                 f"{BORDER}"
             )
             await user.send(message, view=SukoonInviteView())
-            logger.info(f"Successfully sent farewell to {user.name} (ID: {user.id})")
-            self._record_message(success=True)
+            logger.info(f"Successfully sent farewell to {user.name} (ID: {user.id}) in guild {guild_id}")
+            self._record_message(guild_id, success=True)
             return True
 
         except discord.Forbidden:
-            error_msg = f"Cannot send DM to {user.name} - DMs closed"
+            error_msg = f"Cannot send DM to {user.name} – DMs closed"
             logger.warning(error_msg)
-            self._record_message(success=False, error_type="dm_closed")
+            self._record_message(guild_id, success=False, error_type="dm_closed")
 
             # Attempt to notify via the system channel if possible
             if hasattr(user, "guild") and user.guild and user.guild.system_channel:
@@ -206,26 +231,61 @@ class FarewellCog(commands.Cog):
 
         except Exception as e:
             logger.error(f"Error sending farewell to {user.name}: {e}")
-            self._record_message(success=False, error_type="other")
+            self._record_message(guild_id, success=False, error_type="other")
             return False
 
     @commands.Cog.listener()
     async def on_member_remove(self, member: discord.Member):
-        logger.info(f"Member leave event for {member.name} (ID: {member.id})")
-        success = await self.send_farewell_message(member)
+        guild_id = member.guild.id
+        # Only process farewell if enabled in this guild
+        if not self.is_farewell_enabled(guild_id):
+            logger.info(f"Farewell messages are disabled in guild {guild_id}. No farewell sent for {member.name}.")
+            return
+        logger.info(f"Member leave event for {member.name} (ID: {member.id}) in guild {guild_id}")
+        success = await self.send_farewell_message(member, guild=member.guild)
         if not success:
-            logger.warning(f"Failed to send farewell to {member.name}")
+            logger.warning(f"Failed to send farewell to {member.name} in guild {guild_id}")
+
+    @app_commands.command(
+        name='farewell',
+        description='Enable or disable farewell messages in this server'
+    )
+    @app_commands.checks.has_permissions(administrator=True)
+    async def farewell(self, interaction: discord.Interaction, enabled: bool):
+        """
+        Toggle farewell messages for this server.
+        Use enabled=true to turn on farewell messages,
+        or enabled=false to turn them off.
+        """
+        guild_id = interaction.guild.id if interaction.guild else "global"
+        try:
+            self.configs.update_one(
+                {'_id': guild_id},
+                {'$set': {'farewell_enabled': enabled}},
+                upsert=True
+            )
+            status = "enabled" if enabled else "disabled"
+            await interaction.response.send_message(
+                f"Farewell messages have been {status} in this server.",
+                ephemeral=True
+            )
+        except Exception as e:
+            logger.error(f"Error updating farewell setting for guild {guild_id}: {e}")
+            await interaction.response.send_message("❌ Error updating settings.", ephemeral=True)
 
     @app_commands.command(
         name='farewell-stats',
-        description='View statistics about farewell messages sent by the bot'
+        description='View statistics about farewell messages sent by the bot for this guild'
     )
     @app_commands.checks.has_permissions(administrator=True)
     async def farewell_stats(self, interaction: discord.Interaction):
         try:
             today = datetime.utcnow().strftime('%Y-%m-%d')
-            today_stats = self.analytics.find_one({'date': today}) or {'total': 0, 'successful': 0, 'failed': 0, 'errors': {}}
-            overall_stats = self.analytics.find_one({'_id': 'overall_stats'}) or {
+            guild_id = interaction.guild.id if interaction.guild else "global"
+            today_stats = self.analytics.find_one({'guild_id': guild_id, 'date': today}) or {
+                'total': 0, 'successful': 0, 'failed': 0, 'errors': {}
+            }
+            overall_stats = self.analytics.find_one({'_id': f'overall_stats_{guild_id}'}) or {
                 'messages_sent': 0,
                 'successful_sends': 0,
                 'failed_sends': 0,
@@ -241,11 +301,9 @@ class FarewellCog(commands.Cog):
                 color=discord.Color.blue(),
                 timestamp=datetime.utcnow()
             )
-
             embed.add_field(
                 name="Overall Statistics",
-                value=f"Total Messages: {total_messages:,}\n"
-                      f"Success Rate: {success_rate:.1f}%",
+                value=f"Total Messages: {total_messages:,}\nSuccess Rate: {success_rate:.1f}%",
                 inline=False
             )
             embed.add_field(
@@ -255,7 +313,6 @@ class FarewellCog(commands.Cog):
                       f"Failed: {today_stats.get('failed', 0):,}",
                 inline=False
             )
-
             if overall_stats.get('errors'):
                 error_stats = overall_stats['errors']
                 error_text = "Error Breakdown:\n"
@@ -263,11 +320,7 @@ class FarewellCog(commands.Cog):
                     error_text += f"• DMs Closed: {error_stats['dm_closed']:,}\n"
                 if error_stats.get('other'):
                     error_text += f"• Other Errors: {error_stats['other']:,}"
-                embed.add_field(
-                    name="Error Statistics",
-                    value=error_text,
-                    inline=False
-                )
+                embed.add_field(name="Error Statistics", value=error_text, inline=False)
 
             embed.set_footer(text="Stats are updated in real-time")
             await interaction.response.send_message(embed=embed)
@@ -285,13 +338,18 @@ class FarewellCog(commands.Cog):
 
     @app_commands.command(
         name='test-farewell',
-        description='Test the farewell message by sending it to yourself'
+        description='Test the farewell message by sending it to yourself (if enabled)'
     )
     async def test_farewell(self, interaction: discord.Interaction):
         try:
-            # Defer the response to allow time for DM operations
             await interaction.response.defer(ephemeral=True)
-            success = await self.send_farewell_message(interaction.user)
+            guild_id = interaction.guild.id if interaction.guild else "global"
+            # Check if farewell messages are enabled before testing
+            if not self.is_farewell_enabled(guild_id):
+                await interaction.followup.send("Farewell messages are disabled in this server. Enable them with /farewell true.", ephemeral=True)
+                return
+            # Pass the current guild and force the message to bypass duplicate check during testing
+            success = await self.send_farewell_message(interaction.user, guild=interaction.guild, force=True)
             if success:
                 await interaction.followup.send("✅ Test farewell message sent! Check your DMs.", ephemeral=True)
             else:
@@ -302,3 +360,4 @@ class FarewellCog(commands.Cog):
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(FarewellCog(bot))
+    
