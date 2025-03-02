@@ -68,7 +68,8 @@ class DiscordBot(commands.Bot):
             "cogs.reqrole",
             "cogs.confess",
             "cogs.snipe",
-            "cogs.leaderboard"
+            "cogs.leaderboard",
+            "cogs.farewell"
         ]
 
     async def setup_hook(self) -> None:
