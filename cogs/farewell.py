@@ -14,7 +14,7 @@ MONGO_URL = os.getenv('MONGO_URL')
 if not MONGO_URL:
     raise ValueError("MONGO_URL environment variable is not set.")
 
-# Border style
+# Define a border for messages
 BORDER = "✧ ⋆ ┈ ┈ ┈ ┈ ┈ ┈ ┈ ⋆ ✧"
 
 # Setup logging
@@ -29,58 +29,61 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Define 50 farewell messages
 farewell_messages = [
     "We at Sukoon will miss having you around! Our door is always open if you'd like to return.",
     "Your presence made Sukoon brighter. Hope to see you again soon!",
     "Every goodbye at Sukoon is just a 'see you later'. We'll be here when you're ready to return!",
     "Thanks for being part of Sukoon's journey. You're always welcome back!",
-    "Your contributions to Sukoon were valuable. Hope our paths cross again!",
-    "We understand that paths sometimes diverge. Know you can always find your way back to Sukoon.",
-    "Wishing you the best on your journey! Sukoon will welcome you back anytime.",
-    "Your unique perspective will be missed in Sukoon. Don't be a stranger!",
-    "Sometimes we need a break, and that's okay. Sukoon will keep your spot warm!",
-    "Sukoon won't be quite the same without you. Hope to catch you later!",
-    "May your adventures be exciting! Remember, you've got friends here at Sukoon when you return.",
-    "Your departure leaves a space in Sukoon. Feel free to fill it again anytime!",
-    "Today's goodbye doesn't have to be forever. Looking forward to your return to Sukoon!",
-    "Thanks for all the memories at Sukoon! Here's hoping we make more in the future.",
-    "Your presence made Sukoon better. The door remains open for your return!",
-    "We at Sukoon respect your decision to leave, but know you're always welcome back!",
-    "Missing you already! Don't forget about Sukoon on your journey.",
-    "Every member matters to Sukoon, and you're no exception. Hope to see you again!",
-    "Your time here at Sukoon was appreciated. Remember, good friends are always welcome back.",
-    "Wherever your path leads, remember you've got friends here at Sukoon!",
-    "Sometimes the best journeys include a return home. Sukoon will be here!",
-    "Thank you for being part of Sukoon. Come back anytime!",
-    "Your contributions made a difference at Sukoon. Hope you'll return to make more!",
-    "Sad to see you go, but excited for your potential return to Sukoon!",
-    "Our Sukoon community was better with you in it. The door's always open!",
-    "Wishing you the best on your new path. Don't forget to visit Sukoon!",
-    "You'll be missed more than you know at Sukoon. Hope to see you again soon!",
-    "Thanks for sharing your time with Sukoon. Remember, you're always welcome back!",
-    "Your departure leaves a void in Sukoon, but we hope it's not permanent!",
-    "May your journey be wonderful, but know you can always return home to Sukoon.",
-    "We enjoyed having you here at Sukoon! Don't make this goodbye permanent.",
-    "Sukoon was brighter with you in it. Hope you'll light it up again soon!",
-    "Remember all the good times at Sukoon? There's more to be had when you return!",
-    "Your chapter at Sukoon might be paused, but it doesn't have to be over!",
-    "We'll keep your memories alive at Sukoon, hoping you'll come make new ones!",
-    "Sometimes the best decision is taking a break. Sukoon will welcome you back anytime!",
-    "Your presence in Sukoon will be missed! Don't forget about your friends here.",
-    "Sukoon community won't be the same without you. Hope it's just temporary!",
-    "Thanks for all you brought to Sukoon. Come back and bring more!",
-    "We understand needing change, but remember where your Sukoon family is!",
-    "Your spot in Sukoon will always be here for you.",
-    "Hoping this goodbye is more of a 'see you later' from Sukoon!",
-    "We'll miss your unique energy in Sukoon! Bring it back sometime!",
-    "Sukoon's door will always be open for your return.",
-    "Your journey may lead elsewhere, but remember where Sukoon awaits!",
-    "We at Sukoon respect your choice to leave, but hope you'll choose to return!",
-    "May new adventures bring you joy, and Sukoon welcome you back!",
-    "This farewell from Sukoon doesn't have to be final. We'll be here!",
-    "Thanks for being part of Sukoon's story. There's always room for another chapter!"
+    "Your contributions enriched our community. We'll miss you dearly!",
+    "Although it's farewell for now, remember that you'll always have a home at Sukoon.",
+    "Saying goodbye is never easy. Your absence will be felt here.",
+    "You brought joy to our community. We look forward to your return someday.",
+    "Your presence was a gift. We hope our paths cross again soon.",
+    "The memories you left behind will always be cherished at Sukoon.",
+    "It’s not a goodbye, it’s a see you later. We can’t wait to have you back.",
+    "Thank you for being an amazing part of our journey. Farewell until we meet again.",
+    "Your spirit made our community stronger. We'll miss your unique energy.",
+    "Even as you depart, the memories will always linger here at Sukoon.",
+    "Farewell, dear friend. Your legacy will live on in our community.",
+    "Goodbye for now. Your contributions have left a lasting mark on Sukoon.",
+    "Wishing you all the best on your new adventures. Sukoon will always welcome you back.",
+    "Your time with us was treasured. We hope you'll return one day.",
+    "You will be missed, but your memories will keep us company.",
+    "Take care on your journey. Remember, Sukoon is just a heartbeat away.",
+    "We’re sad to see you go, but excited for your future endeavors.",
+    "Until we meet again, keep the wonderful memories of Sukoon alive in your heart.",
+    "Your departure leaves a void, but your spirit remains with us always.",
+    "Farewell, and may your future be as bright as your time with us.",
+    "It’s hard to say goodbye, but easier knowing you'll return someday.",
+    "Thank you for the laughter and love you brought to our community.",
+    "Our community won’t be the same without you. Come back soon!",
+    "Every ending is a new beginning. We look forward to your return.",
+    "Your journey continues beyond these walls. Safe travels, friend.",
+    "Parting is such sweet sorrow, but we'll always remember you.",
+    "Though you're leaving, your imprint on our hearts will never fade.",
+    "Farewell, friend. Our door remains open whenever you wish to return.",
+    "We wish you the best on your path ahead. Sukoon will be here waiting.",
+    "Goodbye for now, but not forever. We’ll eagerly await your return.",
+    "We cherish the moments shared and hope to make more in the future.",
+    "Our community shines brighter with you in it. Farewell, until next time.",
+    "Your departure may be painful, but the memories are forever.",
+    "As you leave, know that you will always be part of the Sukoon family.",
+    "Wishing you success and happiness on your next adventure.",
+    "Our hearts are heavy, but full of gratitude for your time with us.",
+    "Your journey continues elsewhere, but you'll always have a home here.",
+    "Every farewell reminds us of how much you meant to us. Until we meet again.",
+    "Your time here was a gift. We look forward to your return someday.",
+    "Our community misses you already. Hope your path brings you joy.",
+    "We bid you farewell with love and the hope of a future reunion.",
+    "Your unique spirit enriched our lives. We eagerly await your return.",
+    "Goodbye, and best of luck in all that you do.",
+    "Until we meet again, know that you'll always be a part of Sukoon.",
+    "We’ll miss your smile, your energy, and your kind heart.",
+    "Farewell, dear friend. Our community will always welcome you back with open arms."
 ]
 
+# A persistent view for the invite button
 class SukoonInviteView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
@@ -91,17 +94,17 @@ class SukoonInviteView(discord.ui.View):
             emoji="🌸"
         ))
 
+# Farewell Cog that sends a DM every time a member leaves
 class FarewellCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+        # Add the persistent view so that buttons remain active
         self.bot.add_view(SukoonInviteView())
         logger.info("Added persistent invite view")
         try:
             self.client = MongoClient(MONGO_URL)
             self.db = self.client.sukoon_bot
             self.analytics = self.db.farewell_analytics
-            self.sent_messages = self.db.sent_messages
-            # New collection for guild configuration (farewell enabled/disabled and log channel)
             self.configs = self.db.guild_configs
             logger.info("Successfully connected to MongoDB")
         except Exception as e:
@@ -115,27 +118,8 @@ class FarewellCog(commands.Cog):
 
     def is_farewell_enabled(self, guild_id) -> bool:
         doc = self.configs.find_one({'_id': guild_id})
+        # Default is False unless explicitly enabled
         return doc.get('farewell_enabled', False) if doc else False
-
-    def _can_send_message(self, user: discord.User, guild_id) -> bool:
-        try:
-            # Check if a farewell message for this user has already been sent in this guild
-            if self.sent_messages.find_one({'user_id': user.id, 'guild_id': guild_id}):
-                logger.info(f"User {user.id} already received a farewell message in guild {guild_id}")
-                return False
-
-            # Record that a farewell message has been sent for this user in this guild
-            self.sent_messages.insert_one({
-                'user_id': user.id,
-                'guild_id': guild_id,
-                'timestamp': datetime.utcnow()
-            })
-            logger.info(f"Recording farewell message for user {user.id} in guild {guild_id}")
-            return True
-
-        except Exception as e:
-            logger.error(f"Error in _can_send_message: {e}")
-            return False
 
     def _record_message(self, guild_id, success: bool, error_type: str = "unknown"):
         today = datetime.utcnow().strftime('%Y-%m-%d')
@@ -150,14 +134,11 @@ class FarewellCog(commands.Cog):
             if not success and error_type:
                 update['$inc'][f'errors.{error_type}'] = 1
 
-            # Update daily stats for this guild
             self.analytics.update_one(
                 {'guild_id': guild_id, 'date': today},
                 update,
                 upsert=True
             )
-
-            # Update overall stats for this guild
             self.analytics.update_one(
                 {'_id': f'overall_stats_{guild_id}'},
                 {
@@ -177,8 +158,6 @@ class FarewellCog(commands.Cog):
             logger.error(f"Error recording analytics: {e}")
 
     async def log_dm_attempt(self, guild_id, user: discord.User, success: bool, error_type: str, details: str):
-        """Log the DM attempt in the configured channel using an embed."""
-        # Fetch configuration to see if a log channel is set
         config_doc = self.configs.find_one({'_id': guild_id})
         if config_doc and 'log_channel' in config_doc:
             log_channel_id = config_doc['log_channel']
@@ -203,29 +182,12 @@ class FarewellCog(commands.Cog):
                 logger.error(f"Error sending log embed to channel {log_channel_id} for guild {guild_id}: {e}")
 
     async def send_farewell_message(self, user: discord.User, guild: discord.Guild = None, force: bool = False) -> bool:
-        # Determine the guild ID from the passed guild or from the user (if Member)
-        guild_id = None
-        if guild:
-            guild_id = guild.id
-        elif isinstance(user, discord.Member):
-            guild_id = user.guild.id
-        else:
-            logger.warning("No guild information available; using 'global' as guild id.")
-            guild_id = "global"
-
-        # Only send farewell if the feature is enabled for this guild (unless forced via test command)
+        guild_id = guild.id if guild else (user.guild.id if isinstance(user, discord.Member) else "global")
         if not force and not self.is_farewell_enabled(guild_id):
             logger.info(f"Farewell messages are disabled in guild {guild_id}. Skipping farewell for {user.name}.")
             return False
 
         logger.info(f"Processing farewell for {user.name} (ID: {user.id}) in guild {guild_id}")
-        if not force:
-            if not self._can_send_message(user, guild_id):
-                logger.info(f"Skipping farewell for {user.name} in guild {guild_id} – already sent")
-                return False
-        else:
-            logger.info("Force sending farewell message, bypassing duplicate check.")
-
         try:
             message = (
                 f"{BORDER}\n\n"
@@ -239,14 +201,12 @@ class FarewellCog(commands.Cog):
             self._record_message(guild_id, success=True)
             await self.log_dm_attempt(guild_id, user, success=True, error_type="", details="Farewell DM sent successfully.")
             return True
-
         except discord.Forbidden:
             error_msg = f"Cannot send DM to {user.name} – DMs closed"
             logger.warning(error_msg)
             self._record_message(guild_id, success=False, error_type="dm_closed")
             await self.log_dm_attempt(guild_id, user, success=False, error_type="DMs Closed", details=error_msg)
             return False
-
         except Exception as e:
             logger.error(f"Error sending farewell to {user.name}: {e}")
             self._record_message(guild_id, success=False, error_type="other")
@@ -256,7 +216,6 @@ class FarewellCog(commands.Cog):
     @commands.Cog.listener()
     async def on_member_remove(self, member: discord.Member):
         guild_id = member.guild.id
-        # Only process farewell if enabled in this guild
         if not self.is_farewell_enabled(guild_id):
             logger.info(f"Farewell messages are disabled in guild {guild_id}. No farewell sent for {member.name}.")
             return
@@ -271,11 +230,6 @@ class FarewellCog(commands.Cog):
     )
     @app_commands.checks.has_permissions(administrator=True)
     async def farewell(self, interaction: discord.Interaction, enabled: bool):
-        """
-        Toggle farewell messages for this server.
-        Use enabled=true to turn on farewell messages,
-        or enabled=false to turn them off.
-        """
         guild_id = interaction.guild.id if interaction.guild else "global"
         try:
             self.configs.update_one(
@@ -327,9 +281,11 @@ class FarewellCog(commands.Cog):
             )
             embed.add_field(
                 name="Today's Statistics",
-                value=f"Total: {today_stats.get('total', 0):,}\n"
-                      f"Successful: {today_stats.get('successful', 0):,}\n"
-                      f"Failed: {today_stats.get('failed', 0):,}",
+                value=(
+                    f"Total: {today_stats.get('total', 0):,}\n"
+                    f"Successful: {today_stats.get('successful', 0):,}\n"
+                    f"Failed: {today_stats.get('failed', 0):,}"
+                ),
                 inline=False
             )
             if overall_stats.get('errors'):
@@ -340,7 +296,6 @@ class FarewellCog(commands.Cog):
                 if error_stats.get('other'):
                     error_text += f"• Other Errors: {error_stats['other']:,}"
                 embed.add_field(name="Error Statistics", value=error_text, inline=False)
-
             embed.set_footer(text="Stats are updated in real-time")
             await interaction.response.send_message(embed=embed)
         except Exception as e:
@@ -363,11 +318,9 @@ class FarewellCog(commands.Cog):
         try:
             await interaction.response.defer(ephemeral=True)
             guild_id = interaction.guild.id if interaction.guild else "global"
-            # Check if farewell messages are enabled before testing
             if not self.is_farewell_enabled(guild_id):
                 await interaction.followup.send("Farewell messages are disabled in this server. Enable them with /farewell true.", ephemeral=True)
                 return
-            # Pass the current guild and force the message to bypass duplicate check during testing
             success = await self.send_farewell_message(interaction.user, guild=interaction.guild, force=True)
             if success:
                 await interaction.followup.send("✅ Test farewell message sent! Check your DMs.", ephemeral=True)
