@@ -101,7 +101,7 @@ class FarewellCog(commands.Cog):
             self.db = self.client.sukoon_bot
             self.analytics = self.db.farewell_analytics
             self.sent_messages = self.db.sent_messages
-            # New collection for guild configuration (farewell enabled/disabled)
+            # New collection for guild configuration (farewell enabled/disabled and log channel)
             self.configs = self.db.guild_configs
             logger.info("Successfully connected to MongoDB")
         except Exception as e:
@@ -176,6 +176,32 @@ class FarewellCog(commands.Cog):
         except Exception as e:
             logger.error(f"Error recording analytics: {e}")
 
+    async def log_dm_attempt(self, guild_id, user: discord.User, success: bool, error_type: str, details: str):
+        """Log the DM attempt in the configured channel using an embed."""
+        # Fetch configuration to see if a log channel is set
+        config_doc = self.configs.find_one({'_id': guild_id})
+        if config_doc and 'log_channel' in config_doc:
+            log_channel_id = config_doc['log_channel']
+            channel = self.bot.get_channel(log_channel_id)
+            if channel is None:
+                logger.warning(f"Log channel with ID {log_channel_id} not found for guild {guild_id}.")
+                return
+            embed = discord.Embed(
+                title="Farewell DM Attempt",
+                color=discord.Color.green() if success else discord.Color.red(),
+                timestamp=datetime.utcnow()
+            )
+            embed.add_field(name="User", value=f"{user} ({user.id})", inline=False)
+            embed.add_field(name="Status", value="Success" if success else "Failed", inline=True)
+            if not success:
+                embed.add_field(name="Error Type", value=error_type, inline=True)
+            embed.add_field(name="Details", value=details, inline=False)
+            embed.set_footer(text=f"Guild ID: {guild_id}")
+            try:
+                await channel.send(embed=embed)
+            except Exception as e:
+                logger.error(f"Error sending log embed to channel {log_channel_id} for guild {guild_id}: {e}")
+
     async def send_farewell_message(self, user: discord.User, guild: discord.Guild = None, force: bool = False) -> bool:
         # Determine the guild ID from the passed guild or from the user (if Member)
         guild_id = None
@@ -211,18 +237,20 @@ class FarewellCog(commands.Cog):
             await user.send(message, view=SukoonInviteView())
             logger.info(f"Successfully sent farewell to {user.name} (ID: {user.id}) in guild {guild_id}")
             self._record_message(guild_id, success=True)
+            await self.log_dm_attempt(guild_id, user, success=True, error_type="", details="Farewell DM sent successfully.")
             return True
 
         except discord.Forbidden:
             error_msg = f"Cannot send DM to {user.name} – DMs closed"
             logger.warning(error_msg)
             self._record_message(guild_id, success=False, error_type="dm_closed")
-            # Removed fallback: no message is sent to any channel.
+            await self.log_dm_attempt(guild_id, user, success=False, error_type="DMs Closed", details=error_msg)
             return False
 
         except Exception as e:
             logger.error(f"Error sending farewell to {user.name}: {e}")
             self._record_message(guild_id, success=False, error_type="other")
+            await self.log_dm_attempt(guild_id, user, success=False, error_type="Other", details=str(e))
             return False
 
     @commands.Cog.listener()
@@ -349,6 +377,25 @@ class FarewellCog(commands.Cog):
             logger.error(f"Error in test-farewell command: {e}")
             await interaction.followup.send("❌ An error occurred while testing the farewell message.", ephemeral=True)
 
+    @app_commands.command(
+        name='farewell-log',
+        description='Set the channel where farewell DM attempts are logged'
+    )
+    @app_commands.checks.has_permissions(administrator=True)
+    async def farewell_log(self, interaction: discord.Interaction, channel: discord.TextChannel):
+        guild_id = interaction.guild.id if interaction.guild else "global"
+        try:
+            self.configs.update_one(
+                {'_id': guild_id},
+                {'$set': {'log_channel': channel.id}},
+                upsert=True
+            )
+            await interaction.response.send_message(
+                f"Log channel has been set to {channel.mention}.", ephemeral=True
+            )
+        except Exception as e:
+            logger.error(f"Error setting log channel for guild {guild_id}: {e}")
+            await interaction.response.send_message("❌ Error setting log channel.", ephemeral=True)
+
 async def setup(bot: commands.Bot):
     await bot.add_cog(FarewellCog(bot))
-            
