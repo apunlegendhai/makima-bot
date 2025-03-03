@@ -2,7 +2,7 @@ import discord
 from discord.ext import commands
 import json
 import aiosqlite
-from datetime import datetime, timedelta
+from datetime import datetime
 import random
 import re
 import os
@@ -27,9 +27,6 @@ class AutoResponderCog(commands.Cog):
 
         # Database connection (persistent)
         self.db: Optional[aiosqlite.Connection] = None
-
-        # Setup the database (async) and store the connection
-        asyncio.create_task(self.setup_database())
 
     async def setup_database(self):
         self.db = await aiosqlite.connect(self.db_path)
@@ -62,11 +59,6 @@ class AutoResponderCog(commands.Cog):
         await self.db.commit()
 
     async def load_triggers_for_guild(self, guild_id: int) -> List[Dict[str, Any]]:
-        """
-        Load all triggers (both global and guild-specific) for a guild.
-        Cache the result in self.triggers_cache.
-        """
-        # If cached, return it
         if guild_id in self.triggers_cache:
             return self.triggers_cache[guild_id]
 
@@ -104,7 +96,6 @@ class AutoResponderCog(commands.Cog):
         return triggers
 
     def invalidate_triggers_cache(self, guild_id: int):
-        """Invalidate the triggers cache for a given guild."""
         if guild_id in self.triggers_cache:
             del self.triggers_cache[guild_id]
 
@@ -117,14 +108,20 @@ class AutoResponderCog(commands.Cog):
                 row = await cursor.fetchone()
                 if row:
                     trigger = {
-                        'id': row[0], 'pattern': row[1], 'match_type': row[2],
-                        'case_sensitive': row[3], 'responses': json.loads(row[4]),
-                        'cooldown': row[5], 'channels': json.loads(row[6] or '[]'),
+                        'id': row[0],
+                        'pattern': row[1],
+                        'match_type': row[2],
+                        'case_sensitive': row[3],
+                        'responses': json.loads(row[4]),
+                        'cooldown': row[5],
+                        'channels': json.loads(row[6] or '[]'),
                         'roles': json.loads(row[7] or '[]'),
                         'blacklist_users': json.loads(row[8] or '[]'),
                         'whitelist_users': json.loads(row[9] or '[]'),
-                        'creator_id': row[10], 'created_at': datetime.fromisoformat(row[11]),
-                        'guild_id': row[12], 'is_global': bool(row[13])
+                        'creator_id': row[10],
+                        'created_at': datetime.fromisoformat(row[11]),
+                        'guild_id': row[12],
+                        'is_global': bool(row[13])
                     }
                     return trigger
         except Exception as e:
@@ -142,13 +139,11 @@ class AutoResponderCog(commands.Cog):
     ])
     async def add_trigger(self, interaction: discord.Interaction, pattern: str,
                           response: str, match_type: str = "exact", is_global: bool = False):
-        # Check permission for global trigger creation
         if is_global and not interaction.user.guild_permissions.administrator:
             await interaction.response.send_message(
                 "Administrator permissions required for global triggers!", ephemeral=True)
             return
 
-        # Prevent duplicate triggers (same pattern and scope)
         try:
             query = 'SELECT id FROM triggers WHERE pattern = ? AND '
             query += 'is_global = 1' if is_global else 'guild_id = ?'
@@ -175,12 +170,10 @@ class AutoResponderCog(commands.Cog):
                 '[]', '[]', '[]', '[]'
             ))
             await self.db.commit()
-            # Invalidate the cache for this guild, if applicable
-            if not is_global:
-                self.invalidate_triggers_cache(interaction.guild.id)
-            else:
-                # Invalidate caches for all guilds since global triggers apply everywhere.
+            if is_global:
                 self.triggers_cache = {}
+            else:
+                self.invalidate_triggers_cache(interaction.guild.id)
             await interaction.response.send_message(
                 f"Trigger '{pattern}' added {'globally' if is_global else f'for server: {interaction.guild.name}'}!")
         except Exception as e:
@@ -209,8 +202,9 @@ class AutoResponderCog(commands.Cog):
 
             await self.db.execute('DELETE FROM triggers WHERE pattern = ?', (pattern,))
             await self.db.commit()
-            # Invalidate caches
-            if guild_id:
+            if is_global:
+                self.triggers_cache = {}
+            elif guild_id:
                 self.invalidate_triggers_cache(guild_id)
             await interaction.response.send_message(f"Trigger '{pattern}' deleted!")
         except Exception as e:
@@ -244,48 +238,40 @@ class AutoResponderCog(commands.Cog):
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
-        # Skip bots and DMs
         if message.author.bot or not message.guild:
             return
 
         try:
-            # Load triggers for this guild (global + guild-specific)
             triggers = await self.load_triggers_for_guild(message.guild.id)
         except Exception as e:
             print(f"Error loading triggers in on_message: {e}")
             return
 
         for trigger in triggers:
-            # Check trigger conditions
             if not self._check_trigger(trigger, message):
                 continue
 
-            # Check cooldown (per trigger and per channel)
             cooldown_seconds = trigger.get('cooldown', 0)
             key = (trigger['id'], message.channel.id)
             now = datetime.utcnow()
             if cooldown_seconds:
                 last_trigger = self.cooldown_cache.get(key)
                 if last_trigger and (now - last_trigger).total_seconds() < cooldown_seconds:
-                    continue  # still in cooldown period
+                    continue
 
-            # Passed cooldown; update last activation time
             self.cooldown_cache[key] = now
 
-            # Choose a random response from the trigger's responses
             try:
                 trigger_data = random.choice(trigger['responses'])
             except Exception as e:
                 print(f"Error choosing a response: {e}")
                 continue
 
-            # Create response based on type
             if trigger_data.get('type') == 'embed':
                 response = discord.Embed(description=trigger_data.get('content', ''))
             else:
                 response = trigger_data.get('content', '')
 
-            # Log the trigger activation
             try:
                 await self.db.execute('''
                     INSERT INTO logs (trigger_id, user_id, channel_id, timestamp)
@@ -296,7 +282,6 @@ class AutoResponderCog(commands.Cog):
             except Exception as e:
                 print(f"Error logging trigger activation: {e}")
 
-            # Send the response with error handling
             try:
                 if isinstance(response, discord.Embed):
                     await message.channel.send(embed=response)
@@ -305,27 +290,21 @@ class AutoResponderCog(commands.Cog):
             except Exception as e:
                 print(f"Error sending response: {e}")
 
-        # Process commands if any (so text-based commands are not blocked)
         await self.bot.process_commands(message)
 
     def _check_trigger(self, trigger: Dict, message: discord.Message) -> bool:
-        # Check channel restrictions
         if trigger['channels'] and message.channel.id not in trigger['channels']:
             return False
 
-        # Check role restrictions
         if trigger['roles'] and not any(role.id in trigger['roles'] for role in message.author.roles):
             return False
 
-        # Check user blacklist
         if message.author.id in trigger['blacklist_users']:
             return False
 
-        # Check whitelist (if whitelist exists, user must be in it)
         if trigger['whitelist_users'] and message.author.id not in trigger['whitelist_users']:
             return False
 
-        # Finally, check if the message content matches the trigger's pattern
         return self.match_message(trigger, message.content)
 
     def match_message(self, trigger: Dict, message_content: str) -> bool:
@@ -345,9 +324,18 @@ class AutoResponderCog(commands.Cog):
             try:
                 return bool(re.search(pattern, message_content))
             except re.error:
-                # If the regex pattern is invalid, skip matching
                 return False
         return False
 
+    async def cog_unload(self):
+        if self.db:
+            try:
+                await self.db.close()
+            except RuntimeError as e:
+                # This error can occur if the event loop is already closed.
+                print(f"Error closing DB: {e}")
+
 async def setup(bot: commands.Bot):
-    await bot.add_cog(AutoResponderCog(bot))
+    cog = AutoResponderCog(bot)
+    await cog.setup_database()
+    await bot.add_cog(cog)
