@@ -1,3 +1,4 @@
+import asyncio
 import matplotlib
 matplotlib.use('Agg')  # Use a non-interactive backend
 import matplotlib.pyplot as plt
@@ -313,7 +314,7 @@ class LeaderboardButtons(discord.ui.View):
         if file:
             await interaction.edit_original_response(embed=embed, view=self, attachments=[file])
         else:
-            await interaction.followup.send_message("Graphical data not available.", ephemeral=True)
+            await interaction.followup.send("Graphical data not available.", ephemeral=True)
 
 
 # ------------------ Statistics Cog ------------------
@@ -597,11 +598,22 @@ class Statistics(commands.Cog):
     @commands.cooldown(1, 3, commands.BucketType.user)
     async def message_count(self, ctx, member: discord.Member = None):
         """Shows message and voice stats with a 14-day graph toggle."""
+        # Send a processing embed immediately with a random color and loading emoji.
+        processing_embed = discord.Embed(
+            description="**<a:sukoon_loadin:1346514275702673431> Loading, please wait**",
+            color=discord.Color(self.get_random_color())
+        )
+        processing_message = await ctx.send(embed=processing_embed)
+        # Introduce a 1 second delay.
+        await asyncio.sleep(1)
+
         target = member or ctx.author
         stats = await self.db.get_user_stats(str(ctx.guild.id), str(target.id))
-        embed = self.create_message_stats_embed(target, stats)
+        final_embed = self.create_message_stats_embed(target, stats)
         view = StatsToggleView(self, target, initial_mode="message")
-        await ctx.send(embed=embed, view=view)
+
+        # Edit the original message with the final result.
+        await processing_message.edit(embed=final_embed, view=view)
 
     @commands.command(name='lb')
     @commands.cooldown(1, 5, commands.BucketType.guild)
@@ -610,15 +622,30 @@ class Statistics(commands.Cog):
         Shows a leaderboard.
         Usage: !lb m -> Message Leaderboard | !lb v -> Voice Leaderboard
         """
+        # Send a processing embed immediately with a random color and loading emoji.
+        processing_embed = discord.Embed(
+            description="**<a:sukoon_loadin:1346514275702673431> Processing leaderboard, please wait**",
+            color=discord.Color(self.get_random_color())
+        )
+        processing_message = await ctx.send(embed=processing_embed)
+        # Introduce a 1 second delay.
+        await asyncio.sleep(1)
+
         mode = mode.lower()
         if mode not in ['m', 'v']:
-            return await ctx.send("Please specify a valid leaderboard type: 'm' or 'v'.")
+            error_embed = discord.Embed(
+                description="Please specify a valid leaderboard type: 'm' or 'v'.",
+                color=discord.Color.red(),
+                timestamp=datetime.utcnow()
+            )
+            return await processing_message.edit(embed=error_embed)
+
         if mode == 'm':
-            embed = await self.create_leaderboard_embed(0, str(ctx.guild.id))
+            final_embed = await self.create_leaderboard_embed(0, str(ctx.guild.id))
         else:
-            embed = await self.create_voice_leaderboard_embed(0, str(ctx.guild.id))
+            final_embed = await self.create_voice_leaderboard_embed(0, str(ctx.guild.id))
         view = LeaderboardButtons(self, mode)
-        await ctx.send(embed=embed, view=view)
+        await processing_message.edit(embed=final_embed, view=view)
 
     @app_commands.command(name="reset-leaderboard", description="Reset message or voice statistics for a server or a specific user.")
     @app_commands.describe(
