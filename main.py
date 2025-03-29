@@ -62,7 +62,7 @@ class DiscordBot(commands.Bot):
             "cogs.purge",
             "cogs.key_generator",
             "cogs.av",
-            "cogs.vanityrole",
+            "cogs.status",
             "cogs.thread",
             "cogs.sticky",
             "cogs.reqrole",
