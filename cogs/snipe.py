@@ -116,6 +116,23 @@ class Snipe(commands.Cog):
     def _ensure_db_folder(self):
         os.makedirs("database", exist_ok=True)
 
+    async def _migrate_db_if_needed(self):
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                # Check if author_id column exists
+                cursor = await db.execute("PRAGMA table_info(deleted_messages)")
+                columns = await cursor.fetchall()
+                column_names = [column[1] for column in columns]
+                
+                if "author_id" not in column_names:
+                    logger.info("Migrating database to add author_id column")
+                    # SQLite doesn't support ADD COLUMN with NOT NULL constraint without default value
+                    await db.execute("ALTER TABLE deleted_messages ADD COLUMN author_id INTEGER")
+                    await db.commit()
+                    logger.info("Database migration completed successfully")
+        except Exception as e:
+            logger.error(f"Error during database migration: {e}")
+
     async def _init_db(self):
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute('''
@@ -124,11 +141,15 @@ class Snipe(commands.Cog):
                     channel_id INTEGER NOT NULL,
                     content TEXT,
                     author TEXT NOT NULL,
+                    author_id INTEGER,
                     deleted_at TIMESTAMP NOT NULL,
                     attachments TEXT
                 )
             ''')
             await db.commit()
+
+        # Migrate database if needed
+        await self._migrate_db_if_needed()
 
         if not self.cleanup_task:
             self.cleanup_task = self.bot.loop.create_task(self._periodic_cleanup())
@@ -176,8 +197,8 @@ class Snipe(commands.Cog):
         try:
             async with aiosqlite.connect(self.db_path) as db:
                 await db.execute(
-                    'INSERT INTO deleted_messages (channel_id, content, author, deleted_at, attachments) VALUES (?, ?, ?, ?, ?)',
-                    (message.channel.id, message.content, message.author.name, datetime.utcnow().isoformat(), 
+                    'INSERT INTO deleted_messages (channel_id, content, author, author_id, deleted_at, attachments) VALUES (?, ?, ?, ?, ?, ?)',
+                    (message.channel.id, message.content, message.author.name, message.author.id, datetime.utcnow().isoformat(), 
                      ','.join(safe_attachments) if safe_attachments else None)
                 )
                 await db.commit()
@@ -196,8 +217,21 @@ class Snipe(commands.Cog):
 
         member = None
         author_name = deleted_msg['author'].lower()
+        
+        # Handle both int and None types for author_id
+        author_id = None
+        if 'author_id' in deleted_msg and deleted_msg['author_id'] is not None:
+            try:
+                author_id = int(deleted_msg['author_id'])
+            except (ValueError, TypeError):
+                author_id = None
+        
         try:
-            member = discord.utils.get(ctx.guild.members, name=deleted_msg['author'])
+            if author_id:
+                member = ctx.guild.get_member(author_id)
+            
+            if not member:
+                member = discord.utils.get(ctx.guild.members, name=deleted_msg['author'])
             if not member:
                 member = discord.utils.get(ctx.guild.members, display_name=deleted_msg['author'])
             if not member:
@@ -208,26 +242,55 @@ class Snipe(commands.Cog):
         except Exception as e:
             logger.error(f"Unexpected error during member lookup: {type(e).__name__}: {e}")
 
+        # Get author mention
+        author_mention = deleted_msg['author']
+        if member:
+            author_mention = member.mention
+        elif author_id:
+            author_mention = f"<@{author_id}>"
+
+        # Format content
+        content = deleted_msg['content'] or "*No content*"
+        
+        # Prepare content with any attachments
+        content_section = content
+        if deleted_msg['attachments']:
+            attachments = deleted_msg['attachments'].split(',')
+            if len(attachments) > 1:
+                attachment_list = "\n".join([f"[Attachment {i+1}]({url})" for i, url in enumerate(attachments)])
+                content_section += f"\n\n**Attachments:**\n{attachment_list}"
+
         embed = discord.Embed(
-            title="Deleted Contents",
-            description=deleted_msg['content'] or "*No content*",
-            color=random.choice(self.embed_colors),
-            timestamp=deleted_at
+            title="Deleted Msgs",
+            color=random.choice(self.embed_colors)
         )
+        
+        # Add fields exactly as requested
+        embed.add_field(name="author mention", value=author_mention, inline=False)
+        embed.add_field(name="deleted at", value=f"{readable_time}", inline=False)
+        
+        # Add the content section
+        embed.add_field(name="content", value=content_section, inline=False)
+        
+        # Set the user's avatar as thumbnail
         if member and member.display_avatar:
             embed.set_thumbnail(url=member.display_avatar.url)
-        embed.add_field(name="Channel", value=f"<#{deleted_msg['channel_id']}>", inline=True)
-        embed.add_field(name="Time Ago", value=readable_time, inline=True)
+        elif author_id:
+            # Fallback to default avatar url pattern if we only have the ID
+            embed.set_thumbnail(url=f"https://cdn.discordapp.com/avatars/{author_id}/avatar.png")
+        
+        # Set the first attachment as image if there's only one
         if deleted_msg['attachments']:
             attachments = deleted_msg['attachments'].split(',')
             if len(attachments) == 1:
                 embed.set_image(url=attachments[0])
-            else:
-                attachment_list = "\n".join([f"[Attachment {i+1}]({url})" for i, url in enumerate(attachments)])
-                embed.add_field(name=f"📎 Attachments ({len(attachments)})", value=attachment_list, inline=False)
-        footer_text = f"Requested by {ctx.author.name}"
+        
+        # Set footer with requester info
+        formatted_time = datetime.utcnow().strftime('%H:%M:%S')
+        footer_text = f"requested by {ctx.author.name} | at {formatted_time}"
         footer_icon = ctx.author.display_avatar.url if ctx.author.display_avatar else None
         embed.set_footer(text=footer_text, icon_url=footer_icon)
+        
         return embed
 
     @commands.command(name='snipe')
@@ -271,7 +334,7 @@ class Snipe(commands.Cog):
                 sent_message = await ctx.reply(embed=first_embed, view=view)
                 view.message = sent_message
                 # Added custom emoji reaction here
-                await ctx.message.add_reaction("<a:sukoon_whitetick:1344206873007620117>")
+                await ctx.message.add_reaction("<a:sukoon_whitetick:1344600976962748458>")
         except aiosqlite.Error as e:
             logger.error(f"Database error in snipe command: {e}")
             error_embed = discord.Embed(
