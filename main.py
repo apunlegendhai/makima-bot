@@ -51,6 +51,7 @@ class DiscordBot(commands.Bot):
         self.processing_commands: Dict[str, bool] = {}
         self.cogs_list = [
             "cogs.greet",
+            "cogs.vanity",
             "cogs.autoresponder",
             "cogs.status_changer",
             "cogs.dragmee",
