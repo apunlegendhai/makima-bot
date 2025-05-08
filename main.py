@@ -71,6 +71,7 @@ class DiscordBot(commands.Bot):
             "cogs.snipe",
             "cogs.leaderboard",
             "cogs.vc-roles",
+            "cogs.ban",
         ]
 
     async def setup_hook(self) -> None:
