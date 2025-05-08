@@ -1,4 +1,3 @@
-
 import discord
 from discord.ext import commands
 from discord import app_commands
@@ -121,13 +120,13 @@ class BanCog(commands.Cog):
             response_count = len(self.responses)
             
             await interaction.response.send_message(
-                f"✅ Ban configuration updated!\nCommand: `.{command}`\nThe bot will randomly choose from {response_count} different ban messages when this command is used.",
+                f"<a:heartspar:1335854160322498653> Ban configuration updated!\nCommand: `.{command}`\nThe bot will randomly choose from {response_count} different ban messages when this command is used.",
                 ephemeral=True
             )
         except Exception as e:
             logger.error(f"Error saving ban config: {e}")
             await interaction.response.send_message(
-                "❌ An error occurred while updating the ban configuration.",
+                "<a:heartspar:1335854160322498653> An error occurred while updating the ban configuration.",
                 ephemeral=True
             )
 
@@ -182,7 +181,7 @@ class BanCog(commands.Cog):
             
         # Check permissions - only administrators can use this command
         if not isinstance(message.author, discord.Member) or not message.author.guild_permissions.administrator:
-            return await message.reply("❌ You don't have permission to use this command. Only administrators can use it.")
+            return await message.reply("<a:heartspar:1335854160322498653> You don't have permission to use this command. Only administrators can use it.")
             
         # Parse mention/user ID and reason - account for dot prefix
         content = message.content[len(dot_command):].strip()
@@ -199,7 +198,7 @@ class BanCog(commands.Cog):
             # No mention found, try to extract a user ID
             parts = content.split()
             if not parts:
-                return await message.reply("❌ You need to mention a user or provide a user ID to ban.")
+                return await message.reply("<a:heartspar:1335854160322498653> You need to mention a user or provide a user ID to ban.")
                 
             potential_id = parts[0].strip()
             
@@ -218,15 +217,15 @@ class BanCog(commands.Cog):
                     # Get reason from the remaining content
                     reason = ' '.join(parts[1:]).strip()
                 except discord.NotFound:
-                    return await message.reply("❌ Could not find a user with that ID.")
+                    return await message.reply("<a:heartspar:1335854160322498653> Could not find a user with that ID.")
                 except Exception as e:
                     logger.error(f"Error fetching user by ID: {e}")
-                    return await message.reply("❌ An error occurred while trying to find the user.")
+                    return await message.reply("<a:heartspar:1335854160322498653> An error occurred while trying to find the user.")
             except ValueError:
-                return await message.reply("❌ Invalid user ID or mention. Please provide a valid user mention or ID.")
+                return await message.reply("<a:heartspar:1335854160322498653> Invalid user ID or mention. Please provide a valid user mention or ID.")
         
         if not target:
-            return await message.reply("❌ You need to mention a user or provide a user ID to ban.")
+            return await message.reply("<a:heartspar:1335854160322498653> You need to mention a user or provide a user ID to ban.")
             
         # If no reason is provided, use a default reason
         if not reason:
@@ -235,11 +234,11 @@ class BanCog(commands.Cog):
         try:
             # Check if bot has ban permissions
             if not message.guild.me.guild_permissions.ban_members:
-                return await message.reply("❌ I don't have the ban permission in this server.")
+                return await message.reply("<a:heartspar:1335854160322498653> I don't have the ban permission in this server.")
                 
             # Check if target can be banned
             if isinstance(target, discord.Member) and target.top_role >= message.guild.me.top_role:
-                return await message.reply("❌ I cannot ban this user as their role is higher than or equal to mine.")
+                return await message.reply("<a:heartspar:1335854160322498653> I cannot ban this user as their role is higher than or equal to mine.")
                 
             # Try to ban the user
             await message.guild.ban(target, reason=f"Banned by {message.author}: {reason}")
@@ -256,10 +255,10 @@ class BanCog(commands.Cog):
             await message.channel.send(formatted_response)
             
         except discord.Forbidden:
-            await message.reply("❌ I don't have permission to ban that user.")
+            await message.reply("<a:heartspar:1335854160322498653> I don't have permission to ban that user.")
         except Exception as e:
             logger.error(f"Error banning user: {e}")
-            await message.reply("❌ An error occurred while trying to ban the user. Make sure I have the proper permissions.")
+            await message.reply("<a:heartspar:1335854160322498653> An error occurred while trying to ban the user. Make sure I have the proper permissions.")
 
     async def cog_load(self):
         # Setup database
