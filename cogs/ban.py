@@ -1,7 +1,7 @@
 import discord
 from discord.ext import commands
 from discord import app_commands
-import asyncpg
+import aiosqlite
 import os
 import logging
 from typing import Optional, Dict, Tuple, List
@@ -15,7 +15,7 @@ logger = logging.getLogger('ban_cog')
 class BanCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        self.db_pool = None
+        self.db_path = None
         self.config_cache = {}  # In-memory cache for faster access
         self.cache_ready = asyncio.Event()  # To signal when cache is ready
         self.responses = []  # Ban responses from file
@@ -51,28 +51,30 @@ class BanCog(commands.Cog):
             self.responses = ["@user has been banned for [reason]"]
         
     async def setup_database(self):
-        # Get database URL from environment variable
-        database_url = os.environ.get('DATABASE_URL')
-        if not database_url:
-            logger.error("DATABASE_URL environment variable not set")
-            self.cache_ready.set()  # Signal cache is ready even though there's no DB
-            return
+        # Create database folder if it doesn't exist
+        database_folder = "database"
+        if not os.path.exists(database_folder):
+            os.makedirs(database_folder)
+            logger.info(f"Created database folder: {database_folder}")
             
+        # Set database path
+        self.db_path = os.path.join(database_folder, "ban_config.db")
+        
         try:
-            # Create connection pool
-            self.db_pool = await asyncpg.create_pool(database_url)
-            
-            # Create table if it doesn't exist
-            await self.db_pool.execute('''
-                CREATE TABLE IF NOT EXISTS ban_config (
-                    guild_id BIGINT PRIMARY KEY,
-                    command TEXT NOT NULL,
-                    response TEXT NOT NULL
-                )
-            ''')
+            # Create database and table if they don't exist
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute('''
+                    CREATE TABLE IF NOT EXISTS ban_config (
+                        guild_id INTEGER PRIMARY KEY,
+                        command TEXT NOT NULL,
+                        response TEXT NOT NULL
+                    )
+                ''')
+                await db.commit()
             
             # Load all configurations into cache
             await self.load_config_cache()
+            logger.info(f"Database setup completed: {self.db_path}")
             
         except Exception as e:
             logger.error(f"Database setup error: {e}")
@@ -81,10 +83,11 @@ class BanCog(commands.Cog):
     async def load_config_cache(self):
         """Load all configurations into memory for faster access"""
         try:
-            if self.db_pool:
-                records = await self.db_pool.fetch('SELECT guild_id, command, response FROM ban_config')
-                self.config_cache = {str(record['guild_id']): (record['command'], record['response']) for record in records}
-                logger.info(f"Loaded {len(self.config_cache)} ban configurations into cache")
+            async with aiosqlite.connect(self.db_path) as db:
+                async with db.execute('SELECT guild_id, command, response FROM ban_config') as cursor:
+                    records = await cursor.fetchall()
+                    self.config_cache = {str(record[0]): (record[1], record[2]) for record in records}
+                    logger.info(f"Loaded {len(self.config_cache)} ban configurations into cache")
             self.cache_ready.set()  # Signal cache is ready
         except Exception as e:
             logger.error(f"Error loading config cache: {e}")
@@ -107,11 +110,12 @@ class BanCog(commands.Cog):
             # Use a placeholder for response since we'll be using random responses from file
             placeholder_response = "Random response will be used"
             
-            if self.db_pool:
-                await self.db_pool.execute(
-                    "INSERT INTO ban_config (guild_id, command, response) VALUES ($1, $2, $3) ON CONFLICT (guild_id) DO UPDATE SET command = $2, response = $3",
-                    interaction.guild.id, command, placeholder_response
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute(
+                    "INSERT OR REPLACE INTO ban_config (guild_id, command, response) VALUES (?, ?, ?)",
+                    (interaction.guild.id, command, placeholder_response)
                 )
+                await db.commit()
             
             # Update cache
             self.config_cache[str(interaction.guild.id)] = (command, placeholder_response)
@@ -152,16 +156,18 @@ class BanCog(commands.Cog):
         config = self.config_cache.get(guild_id)
         
         # If not in cache, try getting from database
-        if not config and self.db_pool:
+        if not config:
             try:
-                row = await self.db_pool.fetchrow(
-                    "SELECT command, response FROM ban_config WHERE guild_id = $1",
-                    int(guild_id)
-                )
-                if row:
-                    config = (row['command'], row['response'])
-                    # Update cache
-                    self.config_cache[guild_id] = config
+                async with aiosqlite.connect(self.db_path) as db:
+                    async with db.execute(
+                        "SELECT command, response FROM ban_config WHERE guild_id = ?",
+                        (int(guild_id),)
+                    ) as cursor:
+                        row = await cursor.fetchone()
+                        if row:
+                            config = (row[0], row[1])
+                            # Update cache
+                            self.config_cache[guild_id] = config
             except Exception as e:
                 logger.error(f"Database query error: {e}")
         
@@ -269,14 +275,11 @@ class BanCog(commands.Cog):
         logger.info("Started response file watcher task")
         
     async def cog_unload(self):
-        # Cancel the file watcher task
+        # Cancel the file wwatcher task
         if self.file_watcher_task and not self.file_watcher_task.done():
             self.file_watcher_task.cancel()
             
-        # Close database connection when cog is unloaded
-        if self.db_pool:
-            await self.db_pool.close()
-            logger.info("Database connection closed")
+        logger.info("Ban cog unloaded")
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(BanCog(bot))
