@@ -5,8 +5,27 @@ import logging
 from typing import Optional, List, Dict, Tuple, Union
 from discord.ui import Button, View
 
-logging.basicConfig(level=logging.INFO)
+import os
+import logging
+
+log_dir = "logs"
+if not os.path.exists(log_dir):
+    os.makedirs(log_dir)
+
+log_file = os.path.join(log_dir, "voice_manager.log")
+
 logger = logging.getLogger('voice_manager')
+logger.setLevel(logging.INFO)
+
+# Remove all handlers associated with the logger object.
+for handler in logger.handlers[:]:
+    logger.removeHandler(handler)
+
+file_handler = logging.FileHandler(log_file, encoding='utf-8')
+formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+file_handler.setFormatter(formatter)
+
+logger.addHandler(file_handler)
 
 class VoiceManager(commands.Cog):
     """
@@ -178,12 +197,34 @@ class VoiceManager(commands.Cog):
 
         members: List[discord.Member] = []
         src_channel = None
+        invalid_channel_error = False
+
+        # Check if source is a user mention (e.g., @user or <@user>)
+        def is_user_mention(s: str) -> bool:
+            return s.startswith("<@") and s.endswith(">") or s.startswith("@")
+
         if source and not more:
-            src_channel = await self.get_voice_channel(ctx, source)
-            if src_channel:
-                if not await self.check_bot_permissions(ctx, src_channel):
-                    return
-                members = [m for m in src_channel.members if not m.bot]
+            if is_user_mention(source):
+                # Extract user ID from mention
+                try:
+                    uid = int(source.strip("<@!>"))
+                    m = ctx.guild.get_member(uid)
+                    if m and m.voice and m.voice.channel:
+                        members.append(m)
+                        # Join the user's voice channel
+                        src_channel = m.voice.channel
+                    else:
+                        src_channel = None
+                except (ValueError, TypeError):
+                    src_channel = None
+            else:
+                src_channel = await self.get_voice_channel(ctx, source)
+                if src_channel:
+                    if not await self.check_bot_permissions(ctx, src_channel):
+                        return
+                    members = [m for m in src_channel.members if not m.bot]
+                else:
+                    invalid_channel_error = True
 
         if not members:
             tokens = (source,) + more if source else ()
@@ -196,6 +237,8 @@ class VoiceManager(commands.Cog):
                 if m and m.voice and m.voice.channel:
                     members.append(m)
             if not members:
+                if invalid_channel_error:
+                    return await ctx.send("<a:sukoon_reddot:1322894157794119732> Invalid channel ID.")
                 return await ctx.send("<a:sukoon_reddot:1322894157794119732> No valid users to pull.")
 
         lock = self.get_user_lock(ctx.author.id)
@@ -520,7 +563,7 @@ class VoiceManager(commands.Cog):
                             await self.target_channel.edit(
                                 user_limit=max(len(self.target_channel.members) + 1, self.target_channel.user_limit + 1)
                             )
-                        
+
                         # Create new permissions that allow everything voice-related
                         allow_perms = discord.PermissionOverwrite(
                             connect=True,
@@ -529,7 +572,7 @@ class VoiceManager(commands.Cog):
                             use_voice_activation=True,
                             view_channel=True
                         )
-                        
+
                         # Grant temporary permissions to the user
                         await self.target_channel.set_permissions(
                             self.user,
@@ -559,7 +602,7 @@ class VoiceManager(commands.Cog):
                     def check(member, before, after):
                         return (member.id == self.user.id and 
                                 after.channel and after.channel.id == self.target_channel.id)
-                    
+
                     await self.cog.bot.wait_for('voice_state_update', check=check, timeout=120)
                 except asyncio.TimeoutError:
                     pass
