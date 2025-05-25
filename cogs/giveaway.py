@@ -21,16 +21,209 @@ DOT_EMOJI         = "<:sukoon_blackdot:1322894649488314378>"
 RED_DOT_EMOJI     = "<:sukoon_redpoint:1322894737736339459>"
 EMBED_COLOR       = 0x2f3136
 CLEANUP_INTERVAL  = 60  # seconds
+ENTRIES_PER_PAGE  = 20  # Number of participants to show per page
+
+class EntriesView(ui.View):
+    """Persistent view for displaying giveaway entries with pagination."""
+
+    def __init__(self, message_id: str, db_manager):
+        super().__init__(timeout=None)
+        self.message_id = message_id
+        self.db = db_manager
+        self.current_page = 0
+
+    @ui.button(label="📊 Entries", style=ButtonStyle.secondary)
+    async def entries_button(self, interaction: discord.Interaction, button: ui.Button):
+        """Show entries for this giveaway."""
+        button.custom_id = f"entries:{self.message_id}"
+        await self.show_entries(interaction)
+
+    async def show_entries(self, interaction: discord.Interaction, page: int = 0):
+        """Display the entries embed with pagination."""
+        try:
+            await interaction.response.defer(ephemeral=True)
+
+            # Get giveaway data
+            giveaway = await self.db.giveaways_collection.find_one({
+                'message_id': self.message_id
+            })
+
+            if not giveaway:
+                await interaction.followup.send("Giveaway not found!", ephemeral=True)
+                return
+
+            # Get real participants
+            real_participants = await self.db.participants_collection.find({
+                'message_id': self.message_id
+            }).to_list(length=None)
+
+            # Get fake participants data
+            fake_reaction_plan = await self.db.fake_reactions_collection.find_one({
+                'message_id': self.message_id
+            })
+
+            # Collect all participant IDs
+            all_participants = []
+
+            # Add real participants
+            for p in real_participants:
+                user_id = p['user_id']
+                if user_id != str(interaction.client.user.id):  # Exclude bot
+                    all_participants.append({
+                        'id': user_id,
+                        'type': 'real'
+                    })
+
+            # Add fake participants if they exist (but treat them as real to hide fake nature)
+            if fake_reaction_plan and 'fake_participants' in fake_reaction_plan:
+                for fake_id in fake_reaction_plan['fake_participants']:
+                    # Only add if not already in real participants
+                    if not any(p['id'] == fake_id for p in all_participants):
+                        all_participants.append({
+                            'id': fake_id,
+                            'type': 'real'  # Show as real to hide fake nature
+                        })
+
+            total_participants = len(all_participants)
+
+            if total_participants == 0:
+                embed = discord.Embed(
+                    title="📊 Giveaway Entries",
+                    description="No participants found for this giveaway.",
+                    color=EMBED_COLOR
+                )
+                embed.add_field(name="Prize", value=giveaway.get('prize', 'Unknown'), inline=False)
+                await interaction.followup.send(embed=embed, ephemeral=True)
+                return
+
+            # Calculate pagination
+            total_pages = max(1, (total_participants + ENTRIES_PER_PAGE - 1) // ENTRIES_PER_PAGE)
+            page = max(0, min(page, total_pages - 1))  # Ensure page is within bounds
+
+            start_idx = page * ENTRIES_PER_PAGE
+            end_idx = min(start_idx + ENTRIES_PER_PAGE, total_participants)
+            page_participants = all_participants[start_idx:end_idx]
+
+            # Create simple embed showing only participants
+            embed = discord.Embed(
+                title="Participants List",
+                color=0x5865F2  # Beautiful Discord blue
+            )
+
+            # Add participants list with clean formatting
+            participant_text = ""
+            for i, participant in enumerate(page_participants, start=start_idx + 1):
+                user_id = participant['id']
+
+                # Handle fake participants - use original_user_id if available
+                if participant.get('is_fake', False) and 'original_user_id' in participant:
+                    display_user_id = participant['original_user_id']
+                else:
+                    display_user_id = user_id.split('_fake_')[0] if '_fake_' in str(user_id) else user_id
+
+                # Try to get user info
+                try:
+                    user = interaction.client.get_user(int(display_user_id))
+                    if user:
+                        display_name = f"{user.display_name}"
+                        username = f"@{user.name}"
+                        participant_text += f"`{i:3d}.` **{display_name}** ({username})\n"
+                    else:
+                        participant_text += f"`{i:3d}.` User ID: {display_user_id}\n"
+                except:
+                    participant_text += f"`{i:3d}.` User ID: {display_user_id}\n"
+
+            if participant_text:
+                embed.description = participant_text
+
+            # Clean footer with pagination info
+            embed.set_footer(
+                text=f"Page {page + 1} of {total_pages} | {total_participants} total participants"
+            )
+
+            # Create pagination view
+            view = EntriesPaginationView(self.message_id, self.db, page, total_pages)
+
+            await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+
+        except Exception as e:
+            logging.error(f"Error showing entries: {e}")
+            await interaction.followup.send("An error occurred while loading entries.", ephemeral=True)
+
+class EntriesPaginationView(ui.View):
+    """View for paginating through entries."""
+
+    def __init__(self, message_id: str, db_manager, current_page: int, total_pages: int):
+        super().__init__(timeout=300)  # 5 minute timeout for pagination
+        self.message_id = message_id
+        self.db = db_manager
+        self.current_page = current_page
+        self.total_pages = total_pages
+
+        # Disable buttons if only one page
+        if total_pages <= 1:
+            self.first_page.disabled = True
+            self.previous_page.disabled = True
+            self.next_page.disabled = True
+            self.last_page.disabled = True
+        else:
+            # Update button states
+            self.first_page.disabled = current_page == 0
+            self.previous_page.disabled = current_page == 0
+            self.next_page.disabled = current_page >= total_pages - 1
+            self.last_page.disabled = current_page >= total_pages - 1
+
+    @ui.button(label="⏪", style=ButtonStyle.secondary)
+    async def first_page(self, interaction: discord.Interaction, button: ui.Button):
+        """Go to first page."""
+        entries_view = EntriesView(self.message_id, self.db)
+        await entries_view.show_entries(interaction, 0)
+
+    @ui.button(label="◀️", style=ButtonStyle.secondary)
+    async def previous_page(self, interaction: discord.Interaction, button: ui.Button):
+        """Go to previous page."""
+        entries_view = EntriesView(self.message_id, self.db)
+        await entries_view.show_entries(interaction, max(0, self.current_page - 1))
+
+    @ui.button(label="▶️", style=ButtonStyle.secondary)
+    async def next_page(self, interaction: discord.Interaction, button: ui.Button):
+        """Go to next page."""
+        entries_view = EntriesView(self.message_id, self.db)
+        await entries_view.show_entries(interaction, min(self.total_pages - 1, self.current_page + 1))
+
+    @ui.button(label="⏩", style=ButtonStyle.secondary)
+    async def last_page(self, interaction: discord.Interaction, button: ui.Button):
+        """Go to last page."""
+        entries_view = EntriesView(self.message_id, self.db)
+        await entries_view.show_entries(interaction, self.total_pages - 1)
 
 class GiveawayEndedView(ui.View):
-    """View with a disabled button showing participant count."""
-    def __init__(self, participant_count: int):
+    """View with persistent buttons that work forever."""
+    def __init__(self, participant_count: int, message_id: str, db_manager, bot):
         super().__init__(timeout=None)
-        self.add_item(ui.Button(
-            style=ButtonStyle.gray,
-            label=f"🎉 {participant_count}",
-            disabled=True
-        ))
+        self.message_id = message_id
+        self.db = db_manager
+        self.bot = bot
+
+    @ui.button(label="", style=ButtonStyle.gray, disabled=False, custom_id="count_persistent")
+    async def count_button(self, interaction: discord.Interaction, button: ui.Button):
+        """Button showing participant count - tells users giveaway ended."""
+        await interaction.response.send_message(
+            "🎉 This giveaway has ended! You can no longer participate, but you can check the entries to see all participants.",
+            ephemeral=True
+        )
+
+    @ui.button(label="Entries", style=ButtonStyle.secondary, custom_id="entries_persistent")
+    async def entries_button(self, interaction: discord.Interaction, button: ui.Button):
+        """Show entries for this giveaway."""
+        print(f"Entries button clicked for giveaway {self.message_id}")
+        entries_view = EntriesView(self.message_id, self.db)
+        await entries_view.show_entries(interaction)
+
+    def update_count_button(self, participant_count: int):
+        """Update the count button label with custom emoji and count."""
+        # Use the party emoji since the custom emoji isn't accessible
+        self.count_button.label = f"🎉 {participant_count}"
 
 class DatabaseManager:
     """Manages MongoDB interactions."""
@@ -58,19 +251,30 @@ class Giveaway(commands.Cog):
         mongo_uri     = os.getenv('MONGO_URL')
         database_name = os.getenv('MONGO_DATABASE', 'giveaway_bot')
 
-        # Logging
-        log_file = os.getenv('LOG_FILE', 'giveaway_logs.log')
+        # Logging setup - store logs in logs folder
+        os.makedirs('logs', exist_ok=True)
+        log_file = os.path.join('logs', 'giveaway_bot.log')
         self.logger = logging.getLogger('GiveawayBot')
-        handler = RotatingFileHandler(log_file, maxBytes=5*1024*1024, backupCount=3)
-        handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
-        self.logger.addHandler(handler)
-        self.logger.setLevel(logging.WARNING)
+        self.logger.handlers.clear()  # Clear any existing handlers
+
+        # File handler
+        file_handler = RotatingFileHandler(log_file, maxBytes=5*1024*1024, backupCount=3)
+        file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+        self.logger.addHandler(file_handler)
+
+        # Console handler
+        console_handler = logging.StreamHandler()
+        console_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+        self.logger.addHandler(console_handler)
+
+        self.logger.setLevel(logging.INFO)
+        self.logger.info("Giveaway bot initializing...")
 
         # DB and tasks
         self.db  = DatabaseManager(mongo_uri, database_name)
         self._ready = asyncio.Event()
         self._checking_lock = asyncio.Lock()
-        
+
         # Timezone - Using Indian Standard Time (IST)
         self.timezone = 'Asia/Kolkata'
 
@@ -79,10 +283,48 @@ class Giveaway(commands.Cog):
 
     async def cog_load(self):
         await self.db.init()
+        # Register persistent views for existing ended giveaways
+        await self.register_persistent_views()
         # Start background tasks after DB initialization
         self.check_giveaways.start()
         self.process_fake_reactions.start()
         self._ready.set()
+
+    async def register_persistent_views(self):
+        """Register persistent views for all ended giveaways on bot startup."""
+        try:
+            ended_giveaways = await self.db.giveaways_collection.find({
+                'status': 'ended'
+            }).to_list(length=None)
+
+            for giveaway in ended_giveaways:
+                message_id = giveaway['message_id']
+
+                # Get participant count for this giveaway
+                participants = await self.db.participants_collection.find({
+                    'message_id': message_id
+                }).to_list(length=None)
+
+                # Count real participants (excluding bot)
+                real_count = len([p for p in participants if p['user_id'] != str(self.bot.user.id)])
+
+                # Get fake participants count
+                fake_plan = await self.db.fake_reactions_collection.find_one({
+                    'message_id': message_id
+                })
+                fake_count = len(fake_plan.get('fake_participants', [])) if fake_plan else 0
+
+                total_count = real_count + fake_count
+
+                # Create and add persistent view
+                view = GiveawayEndedView(total_count, message_id, self.db, self.bot)
+                view.update_count_button(total_count)
+                self.bot.add_view(view)
+
+            print(f"Registered persistent views for {len(ended_giveaways)} ended giveaways")
+
+        except Exception as e:
+            self.logger.error(f"Error registering persistent views: {e}")
 
     def cog_unload(self):
         self.check_giveaways.cancel()
@@ -180,10 +422,10 @@ class Giveaway(commands.Cog):
             # Convert UTC timestamp to local time with proper timezone formatting
             end_dt = datetime.utcfromtimestamp(end_ts).replace(tzinfo=pytz.utc)
             local  = end_dt.astimezone(pytz.timezone(self.timezone))
-            
+
             # Format the time properly (without leading zero in hours)
             time_part = local.strftime("%I:%M %p").lstrip("0")
-            
+
             # Create the full formatted time string
             formatted = (
                 f"{local.strftime('%A')} at {time_part}"
@@ -229,15 +471,20 @@ class Giveaway(commands.Cog):
     async def end_giveaway(self, message_id: str):
         """Ends an active giveaway and announces winners."""
         try:
+            self.logger.info(f"Starting to end giveaway {message_id}")
+
             giveaway = await self.db.giveaways_collection.find_one({
                 'message_id': message_id,
                 'status': 'active'
             })
             if not giveaway:
+                self.logger.warning(f"Giveaway {message_id} not found or not active")
                 return
 
+            self.logger.info(f"Found giveaway {message_id}, fetching channel {giveaway['channel_id']}")
             channel = self.bot.get_channel(giveaway['channel_id'])
             if not channel:
+                self.logger.error(f"Channel {giveaway['channel_id']} not found")
                 await self.db.giveaways_collection.update_one(
                     {'message_id': message_id},
                     {'$set': {'status':'error','error':'Channel not found'}}
@@ -245,14 +492,18 @@ class Giveaway(commands.Cog):
                 return
 
             try:
+                self.logger.info(f"Fetching message {message_id}")
                 message = await channel.fetch_message(int(message_id))
+                self.logger.info(f"Successfully fetched message {message_id}")
             except discord.NotFound:
+                self.logger.error(f"Message {message_id} not found")
                 await self.db.giveaways_collection.update_one(
                     {'message_id': message_id},
                     {'$set': {'status':'error','error':'Message not found'}}
                 )
                 return
             except discord.Forbidden:
+                self.logger.error(f"Permission denied for message {message_id}")
                 await self.db.giveaways_collection.update_one(
                     {'message_id': message_id},
                     {'$set': {'status':'error','error':'Permission denied'}}
@@ -260,6 +511,7 @@ class Giveaway(commands.Cog):
                 return
 
             if not await self.check_bot_permissions(channel):
+                self.logger.error(f"Missing bot permissions in channel {giveaway['channel_id']}")
                 await self.db.giveaways_collection.update_one(
                     {'message_id': message_id},
                     {'$set': {'status':'error','error':'Missing permissions'}}
@@ -278,10 +530,10 @@ class Giveaway(commands.Cog):
                 for forced_id in forced_winners:
                     if forced_id not in valid:
                         valid.append(forced_id)
-                
+
                 # Start with the forced winners
                 winners = forced_winners.copy()
-                
+
                 # If we need more winners than forced ones
                 cnt = giveaway.get('winners_count', 1)
                 if cnt > len(forced_winners):
@@ -295,7 +547,13 @@ class Giveaway(commands.Cog):
                 cnt = giveaway.get('winners_count', 1)
                 winners = random.sample(valid, min(len(valid), cnt)) if valid else []
 
-            mentions = [f"<@{w}>" for w in winners] if winners else ["No winners (no participants)."]
+            mentions = []
+            for w in winners:
+                # If it's a fake ID, extract the original user ID
+                user_id = w.split('_fake_')[0] if '_fake_' in w else w
+                mentions.append(f"<@{user_id}>")
+            if not mentions:
+                mentions = ["No winners (no participants)."]
 
             # Format end time for ended giveaway
             end_dt = datetime.utcnow().replace(tzinfo=pytz.utc)
@@ -317,25 +575,30 @@ class Giveaway(commands.Cog):
             )
             embed.set_author(name=giveaway['prize'], icon_url=channel.guild.icon.url if channel.guild.icon else None)
             embed.set_footer(text=f"Ended at • {formatted}")
-            
+
             # Calculate total participants (real + fake)
-            real_participants_count = len(valid)
-            fake_reactions_plan = await self.db.fake_reactions_collection.find_one({'message_id': message_id})
-            fake_count = fake_reactions_plan.get('total_reactions', 0) if fake_reactions_plan else 0
-            total_participants = real_participants_count + fake_count
-            
-            # Create a view with a grey button showing the participant count
-            view = GiveawayEndedView(total_participants)
-            
+            # Count real and fake participants
+            real_participants_count = len([p for p in valid if '_fake_' not in str(p)])
+            fake_participants_count = len([p for p in valid if '_fake_' in str(p)])
+            total_participants = real_participants_count + fake_participants_count
+
+            # Create a view with persistent buttons
+            view = GiveawayEndedView(total_participants, message_id, self.db, self.bot)
+            view.update_count_button(total_participants)
+
             # Edit the message with the new embed and view, removing existing reactions
+            self.logger.info(f"Clearing reactions and updating message for giveaway {message_id}")
             await message.clear_reactions()
             await message.edit(embed=embed, view=view)
+            self.logger.info(f"Successfully updated message with buttons for giveaway {message_id}")
 
             if winners:
+                self.logger.info(f"Announcing winners for giveaway {message_id}: {winners}")
                 await message.reply(
                     f"{REACTION_EMOJI} Congratulations {', '.join(mentions)}! You won **{giveaway['prize']}**!"
                 )
 
+            self.logger.info(f"Updating database status to ended for giveaway {message_id}")
             await self.db.giveaways_collection.update_one(
                 {'message_id': message_id},
                 {'$set': {
@@ -348,6 +611,9 @@ class Giveaway(commands.Cog):
             task = self.active_fake_reaction_tasks.pop(message_id, None)
             if task:
                 task.cancel()
+                self.logger.info(f"Cancelled fake reaction task for giveaway {message_id}")
+
+            self.logger.info(f"Successfully ended giveaway {message_id}")
 
         except Exception as e:
             self.logger.error(f"Error ending giveaway {message_id}: {e}")
@@ -402,10 +668,14 @@ class Giveaway(commands.Cog):
                 return await ctx.send("Not a giveaway message.", ephemeral=True)
 
             gw = await self.db.giveaways_collection.find_one({
-                'message_id': str(orig.id), 'status': 'ended'
+                'message_id': str(orig.id)
             })
             if not gw:
-                return await ctx.send("Giveaway hasn't ended or cannot be rerolled.", ephemeral=True)
+                return await ctx.send("Giveaway not found.", ephemeral=True)
+
+            # If giveaway is still active, end it first
+            if gw['status'] == 'active':
+                await self.end_giveaway(str(orig.id))
 
             prev = gw.get('winner_ids', [])
             parts = await self.db.participants_collection.find({
@@ -440,16 +710,17 @@ class Giveaway(commands.Cog):
             )
             embed.set_author(name=gw['prize'], icon_url=ctx.guild.icon.url if ctx.guild.icon else None)
             embed.set_footer(text=f"Rerolled at • {formatted}")
-            
+
             # Get participant count for the button
             parts = await self.db.participants_collection.find({'message_id': str(orig.id)}).to_list(None)
             real_count = len([p for p in parts if not p.get('is_fake', False)])
             fake_count = len([p for p in parts if p.get('is_fake', False)])
             total_participants = real_count + fake_count
-            
-            # Create a view with a grey button showing the participant count
-            view = GiveawayEndedView(total_participants)
-            
+
+            # Create a view with a grey button showing the participant count and entries button
+            view = GiveawayEndedView(total_participants, str(orig.id), self.db, self.bot)
+            view.update_count_button(total_participants)
+
             # Edit the message with the new embed and view
             await orig.edit(embed=embed, view=view)
 
@@ -568,27 +839,25 @@ class Giveaway(commands.Cog):
                 if not active:
                     break
 
-                parts = await self.db.participants_collection.find({
-                    'message_id': message_id
-                }).to_list(None)
-                existing = {p['user_id'] for p in parts}
-                available = [mid for mid in member_ids if mid not in existing]
-                if not available:
-                    available = member_ids.copy()
+                # Pick a random user ID from the available pool
+                user_id = random.choice(member_ids)
 
-                user_id = random.choice(available)
-                await self.db.participants_collection.update_one(
-                    {'message_id': message_id, 'user_id': user_id},
-                    {'$set': {
-                        'message_id': message_id,
-                        'user_id': user_id,
-                        'joined_at': int(now),
-                        'is_fake': True
-                    }},
-                    upsert=True
-                )
+                # Add them even if they're already in the list (this is fake data anyway)
+                # No need to check for duplicates since we want the exact count specified
+                # Create a unique fake user ID by appending a counter to avoid duplicates
+                fake_user_id = f"{user_id}_fake_{total_reactions - remaining}"
+
+                # Insert each fake reaction as a separate document
+                await self.db.participants_collection.insert_one({
+                    'message_id': message_id,
+                    'user_id': fake_user_id,
+                    'original_user_id': user_id,  # Keep track of the original user
+                    'joined_at': int(now),
+                    'is_fake': True
+                })
 
                 remaining -= 1
+                self.logger.info(f"Added fake reaction {total_reactions - remaining}/{total_reactions} for user {user_id}")
                 await self.db.fake_reactions_collection.update_one(
                     {'message_id': message_id},
                     {'$set': {'remaining_reactions': remaining}}
@@ -645,31 +914,32 @@ class Giveaway(commands.Cog):
         self,
         interaction: discord.Interaction,
         message_id: str,
-        user_ids: str
+        users: str
     ):
-        """Forces specific users to win a giveaway. Provide comma-separated list of user IDs."""
+        """Forces specific users to win a giveaway. Mention users or provide comma-separated user IDs."""
         try:
             await interaction.response.defer(ephemeral=True)
-            
-            # Parse the comma-separated user IDs
-            # Remove spaces, accept multiple formats like "123, 456" or "123,456" or even "123 456"
-            user_ids = user_ids.replace(' ', '') if user_ids else ''
-            user_id_list = [uid.strip() for uid in user_ids.split(',') if uid.strip()]
-            
+
+            # Parse mentions and user IDs
+            import re
+            user_id_list = []
+
+            # Extract user IDs from mentions (<@123456789>) and plain IDs
+            mention_pattern = r'<@!?(\d+)>'
+            mentions = re.findall(mention_pattern, users)
+            user_id_list.extend(mentions)
+
+            # Remove mentions from the string and split by commas for plain IDs
+            users_cleaned = re.sub(mention_pattern, '', users)
+            plain_ids = [uid.strip() for uid in users_cleaned.split(',') if uid.strip() and uid.strip().isdigit()]
+            user_id_list.extend(plain_ids)
+
+            # Remove duplicates and ensure all are strings
+            user_id_list = list(set(str(uid) for uid in user_id_list))
+
             if not user_id_list:
-                return await interaction.followup.send("Please provide at least one valid user ID.", ephemeral=True)
-            
-            # Validate all user IDs are numbers
-            valid_ids = []
-            for uid in user_id_list:
-                try:
-                    valid_ids.append(str(int(uid)))  # Convert to int and back to string to ensure clean format
-                except ValueError:
-                    return await interaction.followup.send(f"Invalid user ID: {uid}. All IDs must be valid numbers.", ephemeral=True)
-            
-            # Use the validated list
-            user_id_list = valid_ids
-                
+                return await interaction.followup.send("Please mention users or provide valid user IDs.", ephemeral=True)
+
             # Find the active giveaway
             gw = await self.db.giveaways_collection.find_one({
                 'message_id': message_id, 'status': 'active'
@@ -705,7 +975,7 @@ class Giveaway(commands.Cog):
                 {'message_id': message_id},
                 {'$set': {'forced_winner_ids': user_id_list}}
             )
-            
+
             # Add all users as participants
             for uid in user_id_list:
                 await self.db.participants_collection.update_one(
@@ -718,12 +988,12 @@ class Giveaway(commands.Cog):
                     }},
                     upsert=True
                 )
-            
+
             # Update the message for confirmation
             embed = message.embeds[0]
             if not embed:
                 return await interaction.followup.send("No embed found in giveaway message.", ephemeral=True)
-                
+
             # Success - notify user
             mentions = [f"<@{uid}>" for uid in user_id_list]
             count = len(user_id_list)
