@@ -49,30 +49,6 @@ class DiscordBot(commands.Bot):
         self.session: aiohttp.ClientSession = None
         self.command_locks: Dict[str, asyncio.Lock] = {}
         self.processing_commands: Dict[str, bool] = {}
-        self.cogs_list = [
-            "cogs.greet",
-            "cogs.vanity",
-            "cogs.autoresponder",
-            "cogs.status_changer",
-            "cogs.dragmee",
-            "cogs.AvatarBannerUpdater",
-            "cogs.giveaway",
-            "cogs.steal",
-            "cogs.stats",
-            "cogs.afk_cog",
-            "cogs.purge",
-            "cogs.key_generator",
-            "cogs.av",
-            "cogs.status",
-            "cogs.thread",
-            "cogs.sticky",
-            "cogs.reqrole",
-            "cogs.confess",
-            "cogs.snipe",
-            "cogs.leaderboard",
-            "cogs.vc-roles",
-            "cogs.ban",
-        ]
 
     async def setup_hook(self) -> None:
         # Set up aiohttp session and load cogs
@@ -91,13 +67,17 @@ class DiscordBot(commands.Bot):
         return self.command_locks[lock_key]
 
     async def load_cogs(self) -> None:
-        for cog in self.cogs_list:
-            try:
-                if cog not in self.extensions:
-                    await self.load_extension(cog)
-                    logging.info(f"Loaded {cog}")
-            except Exception as e:
-                logging.error(f"Error loading {cog}: {e}")
+        # Get all Python files from cogs directory
+        cogs_dir = os.path.join(os.path.dirname(__file__), 'cogs')
+        for filename in os.listdir(cogs_dir):
+            if filename.endswith('.py') and not filename.startswith('__'):
+                cog_name = f"cogs.{filename[:-3]}"  # Remove .py and add cogs. prefix
+                try:
+                    if cog_name not in self.extensions:
+                        await self.load_extension(cog_name)
+                        logging.info(f"Loaded {cog_name}")
+                except Exception as e:
+                    logging.error(f"Failed to load {cog_name}: {str(e)}")
 
     async def send_error_report(self, error_message: str) -> None:
         if not self.session:
