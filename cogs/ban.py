@@ -20,6 +20,26 @@ class BanCog(commands.Cog):
         self.cache_ready = asyncio.Event()  # To signal when cache is ready
         self.responses = []  # Ban responses from file
         self.last_modified_time = 0  # Track the last modified time of responses.txt
+        
+        # Hardcoded DM messages to send before banning
+        self.ban_dm_messages = [
+            "Congratulations! You've won a lifetime ban from {server}! 🎉",
+            "Achievement unlocked: Get banned from {server}! 🏆",
+            "Oops! Looks like you've been voted off the {server} island. Bye bye! 👋",
+            "Breaking news: You've been banned from {server}. Try not to cry too much. 📰",
+            "The admins of {server} have collectively decided they've seen enough of you. Shocker!",
+            "Your behavior in {server} was so bad, even a bot had to step in. That's pretty sad.",
+            "The door of {server} just hit you on the way out! How's that feel? 🚪",
+            "You've been promoted to ex-member of {server}! What an accomplishment!",
+            "Wow, you really outdid yourself this time! Banned from {server} in record time!",
+            "The trash took itself out of {server} today. How convenient! 🗑️",
+            "You thought the rules didn't apply to you? {server} says otherwise!",
+            "In the game of {server}, you lost. Banned!",
+            "Sorry not sorry, you've been banned from {server}. Maybe try behaving better next time?",
+            "Your {server} free trial has expired... permanently.",
+            "Error 403: Access to {server} forbidden. Reason: You're banned!"
+        ]
+        
         self.load_responses()
         
         # Start the background task to watch for file changes
@@ -30,12 +50,13 @@ class BanCog(commands.Cog):
         last_modified = 0
         while True:
             try:
-                current_modified = os.path.getmtime("responses.txt")
-                if current_modified > last_modified:
-                    with open("responses.txt", "r") as f:
-                        self.responses = [line.strip() for line in f if line.strip()]
-                    logger.info(f"Automatically reloaded {len(self.responses)} ban responses")
-                    last_modified = current_modified
+                if os.path.exists("responses.txt"):
+                    current_modified = os.path.getmtime("responses.txt")
+                    if current_modified > last_modified:
+                        with open("responses.txt", "r") as f:
+                            self.responses = [line.strip() for line in f if line.strip()]
+                        logger.info(f"Automatically reloaded {len(self.responses)} ban responses")
+                        last_modified = current_modified
             except Exception as e:
                 logger.error(f"Error watching responses file: {e}")
             await asyncio.sleep(1)  # Check every second
@@ -49,6 +70,8 @@ class BanCog(commands.Cog):
         except Exception as e:
             logger.error(f"Error loading ban responses: {e}")
             self.responses = ["@user has been banned for [reason]"]
+            
+
         
     async def setup_database(self):
         # Create database folder if it doesn't exist
@@ -246,7 +269,31 @@ class BanCog(commands.Cog):
             if isinstance(target, discord.Member) and target.top_role >= message.guild.me.top_role:
                 return await message.reply("<a:heartspar:1335854160322498653> I cannot ban this user as their role is higher than or equal to mine.")
                 
-            # Try to ban the user
+            # Send DM to the user before banning them
+            dm_sent = False
+            try:
+                # Select a random DM message from the list
+                random_dm_message = random.choice(self.ban_dm_messages)
+                # Format the message with the server name
+                formatted_dm_message = random_dm_message.format(server=message.guild.name)
+                # Send the DM and wait for it to complete
+                await target.send(formatted_dm_message)
+                dm_sent = True
+                logger.info(f"Sent ban DM to {target.name}#{target.discriminator if hasattr(target, 'discriminator') else '0'} ({target.id})")
+                # Add a small delay to ensure DM is processed before ban
+                await asyncio.sleep(1)
+            except discord.Forbidden:
+                logger.warning(f"Could not send DM to {target} - DMs closed or blocked")
+            except Exception as e:
+                logger.error(f"Error sending DM to {target}: {e}")
+            
+            # Log the sequence of events
+            if dm_sent:
+                logger.info(f"DM sent successfully, now proceeding to ban {target.id}")
+            else:
+                logger.info(f"DM could not be sent, proceeding to ban {target.id} anyway")
+                
+            # Ban the user after attempting to send DM
             await message.guild.ban(target, reason=f"Banned by {message.author}: {reason}")
             
             # Get a random response from the responses.txt file
