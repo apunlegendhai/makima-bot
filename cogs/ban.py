@@ -162,8 +162,8 @@ class BanCog(commands.Cog):
         if not message.guild or message.author.bot:
             return
             
-        # Debug logging
-        logger.info(f"Message received: {message.content}")
+        # Debug logging disabled
+        # logger.info(f"Message received: {message.content}")
             
         # Check if message starts with a dot
         if not message.content.startswith('.'):
