@@ -62,6 +62,15 @@ class SnipeView(View):
                 self.update_buttons()
                 embed = await self.cog.create_snipe_embed(self.ctx, self.messages[self.current_page])
                 await interaction.response.edit_message(embed=embed, view=self)
+        except discord.HTTPException as e:
+            if e.status == 429:  # Rate limited
+                logger.warning(f"Rate limited on previous page: {e}")
+                try:
+                    await interaction.followup.send("Rate limited, please wait a moment before trying again.", ephemeral=True)
+                except:
+                    pass
+            else:
+                logger.error(f"HTTP error handling previous page: {e}")
         except Exception as e:
             logger.error(f"Error handling previous page: {type(e).__name__}: {e}")
 
@@ -76,6 +85,15 @@ class SnipeView(View):
                 self.update_buttons()
                 embed = await self.cog.create_snipe_embed(self.ctx, self.messages[self.current_page])
                 await interaction.response.edit_message(embed=embed, view=self)
+        except discord.HTTPException as e:
+            if e.status == 429:  # Rate limited
+                logger.warning(f"Rate limited on next page: {e}")
+                try:
+                    await interaction.followup.send("Rate limited, please wait a moment before trying again.", ephemeral=True)
+                except:
+                    pass
+            else:
+                logger.error(f"HTTP error handling next page: {e}")
         except Exception as e:
             logger.error(f"Error handling next page: {type(e).__name__}: {e}")
 
@@ -85,6 +103,9 @@ class SnipeView(View):
                 for item in self.children:
                     item.disabled = True
                 await self.message.edit(view=self)
+        except discord.HTTPException as e:
+            if e.status != 429:  # Don't log rate limits on timeout
+                logger.error(f"Error handling view timeout: {e}")
         except Exception as e:
             logger.error(f"Error handling view timeout: {type(e).__name__}: {e}")
 
@@ -102,8 +123,12 @@ class Snipe(commands.Cog):
         self.max_age = timedelta(days=7)
         self.connected = False
         self.cleanup_task = None
+        self.db_ready = False
         self._ensure_db_folder()
-        asyncio.create_task(self._init_db())
+
+        # Cache for member lookups to reduce API calls
+        self.member_cache = {}
+        self.cache_expiry = {}
 
         self.embed_colors = [
             0xFF6B6B, 0x4ECDC4, 0x45B7D1, 0x96CEB4, 0xFF9F1C, 0x2D3047,
@@ -114,7 +139,15 @@ class Snipe(commands.Cog):
         ]
 
     def _ensure_db_folder(self):
-        os.makedirs("database", exist_ok=True)
+        try:
+            os.makedirs("database", exist_ok=True)
+            logger.info(f"Database folder ensured at: {os.path.abspath('database')}")
+        except Exception as e:
+            logger.error(f"Error creating database folder: {e}")
+
+    async def cog_load(self):
+        """Called when the cog is loaded"""
+        await self._init_db()
 
     async def _migrate_db_if_needed(self):
         try:
@@ -126,47 +159,77 @@ class Snipe(commands.Cog):
                 
                 if "author_id" not in column_names:
                     logger.info("Migrating database to add author_id column")
-                    # SQLite doesn't support ADD COLUMN with NOT NULL constraint without default value
                     await db.execute("ALTER TABLE deleted_messages ADD COLUMN author_id INTEGER")
                     await db.commit()
                     logger.info("Database migration completed successfully")
         except Exception as e:
             logger.error(f"Error during database migration: {e}")
+            raise
 
     async def _init_db(self):
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute('''
-                CREATE TABLE IF NOT EXISTS deleted_messages (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    channel_id INTEGER NOT NULL,
-                    content TEXT,
-                    author TEXT NOT NULL,
-                    author_id INTEGER,
-                    deleted_at TIMESTAMP NOT NULL,
-                    attachments TEXT
-                )
-            ''')
-            await db.commit()
+        try:
+            logger.info(f"Initializing database at: {os.path.abspath(self.db_path)}")
+            
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute('''
+                    CREATE TABLE IF NOT EXISTS deleted_messages (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        channel_id INTEGER NOT NULL,
+                        content TEXT,
+                        author TEXT NOT NULL,
+                        author_id INTEGER,
+                        deleted_at TIMESTAMP NOT NULL,
+                        attachments TEXT
+                    )
+                ''')
+                await db.commit()
+                logger.info("Database table created/verified successfully")
 
-        # Migrate database if needed
-        await self._migrate_db_if_needed()
+            # Migrate database if needed
+            await self._migrate_db_if_needed()
 
-        if not self.cleanup_task:
-            self.cleanup_task = self.bot.loop.create_task(self._periodic_cleanup())
+            # Test database connection
+            async with aiosqlite.connect(self.db_path) as db:
+                cursor = await db.execute("SELECT COUNT(*) FROM deleted_messages")
+                count = await cursor.fetchone()
+                logger.info(f"Database initialized successfully. Current message count: {count[0]}")
+
+            self.db_ready = True
+
+            if not self.cleanup_task:
+                self.cleanup_task = self.bot.loop.create_task(self._periodic_cleanup())
+                logger.info("Periodic cleanup task started")
+
+        except Exception as e:
+            logger.error(f"Critical error initializing database: {e}")
+            self.db_ready = False
+            raise
 
     async def _periodic_cleanup(self):
         while True:
             try:
-                async with aiosqlite.connect(self.db_path) as db:
-                    cutoff_date = datetime.utcnow() - self.max_age
-                    await db.execute(
-                        'DELETE FROM deleted_messages WHERE deleted_at < ?',
-                        (cutoff_date.isoformat(),)
-                    )
-                    await db.commit()
+                if self.db_ready:
+                    async with aiosqlite.connect(self.db_path) as db:
+                        cutoff_date = datetime.utcnow() - self.max_age
+                        cursor = await db.execute(
+                            'DELETE FROM deleted_messages WHERE deleted_at < ?',
+                            (cutoff_date.isoformat(),)
+                        )
+                        deleted_count = cursor.rowcount
+                        await db.commit()
+                        if deleted_count > 0:
+                            logger.info(f"Cleaned up {deleted_count} old messages")
+                            
+                    # Clean up member cache periodically
+                    current_time = datetime.utcnow()
+                    expired_keys = [k for k, exp_time in self.cache_expiry.items() if current_time > exp_time]
+                    for key in expired_keys:
+                        self.member_cache.pop(key, None)
+                        self.cache_expiry.pop(key, None)
+                        
             except Exception as e:
                 logger.error(f"Error during periodic cleanup: {e}")
-            await asyncio.sleep(3600)
+            await asyncio.sleep(3600)  # Run every hour
 
     @backoff.on_exception(
         backoff.expo,
@@ -190,10 +253,16 @@ class Snipe(commands.Cog):
     async def on_message_delete(self, message: discord.Message) -> None:
         if message.author.bot:
             return
+            
+        if not self.db_ready:
+            logger.warning("Database not ready, skipping message deletion log")
+            return
+
         safe_attachments = [
             att.url for att in message.attachments
             if att.url.startswith('https://cdn.discordapp.com/')
         ]
+        
         try:
             async with aiosqlite.connect(self.db_path) as db:
                 await db.execute(
@@ -202,101 +271,139 @@ class Snipe(commands.Cog):
                      ','.join(safe_attachments) if safe_attachments else None)
                 )
                 await db.commit()
+                logger.debug(f"Logged deleted message from {message.author.name} in channel {message.channel.id}")
         except Exception as e:
             logger.error(f"Error storing deleted message: {e}")
 
-    async def create_snipe_embed(self, ctx: commands.Context, deleted_msg: dict) -> discord.Embed:
-        deleted_at = datetime.fromisoformat(deleted_msg['deleted_at'])
-        time_diff = datetime.utcnow() - deleted_at
-        readable_time = (
-            (f"{time_diff.days}d " if time_diff.days > 0 else "") +
-            (f"{time_diff.seconds // 3600}h " if time_diff.seconds >= 3600 else "") +
-            (f"{(time_diff.seconds % 3600) // 60}m " if time_diff.seconds >= 60 else "") +
-            f"{time_diff.seconds % 60}s"
-        ).strip()
-
+    async def get_member_cached(self, guild: discord.Guild, author_id: int, author_name: str):
+        """Get member with caching to reduce API calls"""
+        cache_key = f"{guild.id}_{author_id}"
+        current_time = datetime.utcnow()
+        
+        # Check cache first
+        if cache_key in self.member_cache:
+            if current_time < self.cache_expiry.get(cache_key, datetime.min):
+                return self.member_cache[cache_key]
+        
+        # Try to find member
         member = None
-        author_name = deleted_msg['author'].lower()
-        
-        # Handle both int and None types for author_id
-        author_id = None
-        if 'author_id' in deleted_msg and deleted_msg['author_id'] is not None:
-            try:
-                author_id = int(deleted_msg['author_id'])
-            except (ValueError, TypeError):
-                author_id = None
-        
         try:
             if author_id:
-                member = ctx.guild.get_member(author_id)
+                member = guild.get_member(author_id)
             
             if not member:
-                member = discord.utils.get(ctx.guild.members, name=deleted_msg['author'])
-            if not member:
-                member = discord.utils.get(ctx.guild.members, display_name=deleted_msg['author'])
-            if not member:
-                async for guild_member in ctx.guild.fetch_members(limit=1000):
-                    if guild_member.name.lower() == author_name or guild_member.display_name.lower() == author_name:
-                        member = guild_member
-                        break
+                # Only search by name if we don't have the member from ID
+                author_name_lower = author_name.lower()
+                member = discord.utils.get(guild.members, name=author_name)
+                if not member:
+                    member = discord.utils.get(guild.members, display_name=author_name)
+            
+            # Cache the result (even if None) for 5 minutes
+            self.member_cache[cache_key] = member
+            self.cache_expiry[cache_key] = current_time + timedelta(minutes=5)
+            
         except Exception as e:
-            logger.error(f"Unexpected error during member lookup: {type(e).__name__}: {e}")
+            logger.error(f"Error during member lookup: {type(e).__name__}: {e}")
+        
+        return member
 
-        # Get author mention
-        author_mention = deleted_msg['author']
-        if member:
-            author_mention = member.mention
-        elif author_id:
-            author_mention = f"<@{author_id}>"
+    async def create_snipe_embed(self, ctx: commands.Context, deleted_msg: dict) -> discord.Embed:
+        try:
+            deleted_at = datetime.fromisoformat(deleted_msg['deleted_at'])
+            time_diff = datetime.utcnow() - deleted_at
+            readable_time = (
+                (f"{time_diff.days}d " if time_diff.days > 0 else "") +
+                (f"{time_diff.seconds // 3600}h " if time_diff.seconds >= 3600 else "") +
+                (f"{(time_diff.seconds % 3600) // 60}m " if time_diff.seconds >= 60 else "") +
+                f"{time_diff.seconds % 60}s"
+            ).strip()
 
-        # Format content
-        content = deleted_msg['content'] or "*No content*"
-        
-        # Prepare content with any attachments
-        content_section = content
-        if deleted_msg['attachments']:
-            attachments = deleted_msg['attachments'].split(',')
-            if len(attachments) > 1:
-                attachment_list = "\n".join([f"[Attachment {i+1}]({url})" for i, url in enumerate(attachments)])
-                content_section += f"\n\n**Attachments:**\n{attachment_list}"
+            # Handle both int and None types for author_id
+            author_id = None
+            if 'author_id' in deleted_msg and deleted_msg['author_id'] is not None:
+                try:
+                    author_id = int(deleted_msg['author_id'])
+                except (ValueError, TypeError):
+                    author_id = None
+            
+            # Use cached member lookup
+            member = await self.get_member_cached(ctx.guild, author_id, deleted_msg['author'])
 
-        embed = discord.Embed(
-            title="Deleted Msgs",
-            color=random.choice(self.embed_colors)
-        )
-        
-        # Add fields exactly as requested
-        embed.add_field(name="author mention", value=author_mention, inline=False)
-        embed.add_field(name="deleted at", value=f"{readable_time}", inline=False)
-        
-        # Add the content section
-        embed.add_field(name="content", value=content_section, inline=False)
-        
-        # Set the user's avatar as thumbnail
-        if member and member.display_avatar:
-            embed.set_thumbnail(url=member.display_avatar.url)
-        elif author_id:
-            # Fallback to default avatar url pattern if we only have the ID
-            embed.set_thumbnail(url=f"https://cdn.discordapp.com/avatars/{author_id}/avatar.png")
-        
-        # Set the first attachment as image if there's only one
-        if deleted_msg['attachments']:
-            attachments = deleted_msg['attachments'].split(',')
-            if len(attachments) == 1:
-                embed.set_image(url=attachments[0])
-        
-        # Set footer with requester info
-        formatted_time = datetime.utcnow().strftime('%H:%M:%S')
-        footer_text = f"requested by {ctx.author.name} | at {formatted_time}"
-        footer_icon = ctx.author.display_avatar.url if ctx.author.display_avatar else None
-        embed.set_footer(text=footer_text, icon_url=footer_icon)
-        
-        return embed
+            # Get author mention
+            author_mention = deleted_msg['author']
+            if member:
+                author_mention = member.mention
+            elif author_id:
+                author_mention = f"<@{author_id}>"
+
+            # Format content
+            content = deleted_msg['content'] or "*No content*"
+            
+            # Prepare content with any attachments
+            content_section = content
+            if deleted_msg['attachments']:
+                attachments = deleted_msg['attachments'].split(',')
+                if len(attachments) > 1:
+                    attachment_list = "\n".join([f"[Attachment {i+1}]({url})" for i, url in enumerate(attachments)])
+                    content_section += f"\n\n**Attachments:**\n{attachment_list}"
+
+            embed = discord.Embed(
+                title="Deleted Msgs",
+                color=random.choice(self.embed_colors)
+            )
+            
+            # Add fields exactly as requested
+            embed.add_field(name="author mention", value=author_mention, inline=False)
+            embed.add_field(name="deleted at", value=f"{readable_time}", inline=False)
+            
+            # Add the content section
+            embed.add_field(name="content", value=content_section, inline=False)
+            
+            # Set the user's avatar as thumbnail
+            if member and member.display_avatar:
+                embed.set_thumbnail(url=member.display_avatar.url)
+            elif author_id:
+                # Fallback to default avatar url pattern if we only have the ID
+                embed.set_thumbnail(url=f"https://cdn.discordapp.com/avatars/{author_id}/avatar.png")
+            
+            # Set the first attachment as image if there's only one
+            if deleted_msg['attachments']:
+                attachments = deleted_msg['attachments'].split(',')
+                if len(attachments) == 1:
+                    embed.set_image(url=attachments[0])
+            
+            # Set footer with requester info
+            formatted_time = datetime.utcnow().strftime('%H:%M:%S')
+            footer_text = f"requested by {ctx.author.name} | at {formatted_time}"
+            footer_icon = ctx.author.display_avatar.url if ctx.author.display_avatar else None
+            embed.set_footer(text=footer_text, icon_url=footer_icon)
+            
+            return embed
+        except Exception as e:
+            logger.error(f"Error creating snipe embed: {e}")
+            # Return a basic error embed
+            return discord.Embed(
+                title="Error",
+                description="Failed to create message embed",
+                color=discord.Color.red()
+            )
 
     @commands.command(name='snipe')
     @commands.has_permissions(administrator=True)
+    @commands.cooldown(1, 5, commands.BucketType.user)  # 1 use per 5 seconds per user
     async def snipe(self, ctx: commands.Context) -> None:
+        if not self.db_ready:
+            embed = discord.Embed(
+                title="Database Not Ready",
+                description="The snipe database is still initializing. Please try again in a moment.",
+                color=discord.Color.orange()
+            )
+            await ctx.send(embed=embed)
+            return
+
         try:
+            logger.info(f"Snipe command executed by {ctx.author.name} in channel {ctx.channel.id}")
+            
             async with aiosqlite.connect(self.db_path) as db:
                 db.row_factory = aiosqlite.Row
                 cursor = await db.execute(
@@ -304,6 +411,8 @@ class Snipe(commands.Cog):
                     (ctx.channel.id,)
                 )
                 deleted_msgs = await cursor.fetchall()
+                
+                logger.info(f"Found {len(deleted_msgs)} deleted messages in channel {ctx.channel.id}")
 
                 if not deleted_msgs:
                     embed = discord.Embed(
@@ -315,10 +424,18 @@ class Snipe(commands.Cog):
                     return
 
                 current_time = datetime.utcnow()
-                valid_msgs = [
-                    msg for msg in deleted_msgs
-                    if (current_time - datetime.fromisoformat(msg['deleted_at'])) <= self.max_age
-                ]
+                valid_msgs = []
+                
+                for msg in deleted_msgs:
+                    try:
+                        msg_time = datetime.fromisoformat(msg['deleted_at'])
+                        if (current_time - msg_time) <= self.max_age:
+                            valid_msgs.append(dict(msg))
+                    except Exception as e:
+                        logger.error(f"Error processing message timestamp: {e}")
+                        continue
+
+                logger.info(f"Found {len(valid_msgs)} valid (non-expired) messages")
 
                 if not valid_msgs:
                     embed = discord.Embed(
@@ -331,10 +448,26 @@ class Snipe(commands.Cog):
 
                 first_embed = await self.create_snipe_embed(ctx, valid_msgs[0])
                 view = SnipeView(self, ctx, valid_msgs)
-                sent_message = await ctx.reply(embed=first_embed, view=view)
-                view.message = sent_message
-                # Added custom emoji reaction here
-                await ctx.message.add_reaction("<a:sukoon_whitetick:1344600976962748458>")
+                
+                try:
+                    sent_message = await ctx.reply(embed=first_embed, view=view)
+                    view.message = sent_message
+                except discord.HTTPException as e:
+                    if e.status == 429:  # Rate limited
+                        await ctx.send("⚠️ Rate limited! Please wait before using this command again.")
+                        return
+                    else:
+                        raise
+                
+                # Add reaction to original command with rate limit handling
+                try:
+                    await ctx.message.add_reaction("<a:sukoon_whitetick:1344600976962748458>")
+                except discord.HTTPException as e:
+                    if e.status != 429:  # Don't log rate limit errors for reactions
+                        logger.warning(f"Failed to add reaction: {e}")
+                except Exception:
+                    logger.warning("Failed to add reaction to command message")
+                    
         except aiosqlite.Error as e:
             logger.error(f"Database error in snipe command: {e}")
             error_embed = discord.Embed(
@@ -343,6 +476,12 @@ class Snipe(commands.Cog):
                 color=discord.Color.red()
             )
             await ctx.send(embed=error_embed)
+        except discord.HTTPException as e:
+            if e.status == 429:
+                await ctx.send("⚠️ Rate limited! Please wait before using this command again.")
+            else:
+                logger.error(f"HTTP error in snipe command: {e}")
+                await ctx.send("An HTTP error occurred. Please try again later.")
         except Exception as e:
             logger.error(f"Unexpected error in snipe command: {type(e).__name__}: {e}")
             error_embed = discord.Embed(
@@ -355,10 +494,30 @@ class Snipe(commands.Cog):
     @snipe.error
     async def snipe_error(self, ctx: commands.Context, error: commands.CommandError):
         if isinstance(error, commands.MissingPermissions):
-            return
+            embed = discord.Embed(
+                title="Permission Denied",
+                description="You need administrator permissions to use this command.",
+                color=discord.Color.red()
+            )
+            await ctx.send(embed=embed)
+        elif isinstance(error, commands.CommandOnCooldown):
+            embed = discord.Embed(
+                title="Cooldown",
+                description=f"Please wait {error.retry_after:.1f} seconds before using this command again.",
+                color=discord.Color.orange()
+            )
+            await ctx.send(embed=embed)
         else:
             logger.error(f"Command error: {type(error).__name__}: {error}")
             await ctx.send("An error occurred while executing the command.")
+
+    def cog_unload(self):
+        """Called when the cog is unloaded"""
+        if self.cleanup_task:
+            self.cleanup_task.cancel()
+        self.member_cache.clear()
+        self.cache_expiry.clear()
+        Snipe._loaded = False
 
 async def setup(bot: commands.Bot) -> None:
     await bot.add_cog(Snipe(bot))
