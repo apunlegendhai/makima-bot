@@ -3,25 +3,18 @@ from discord.ext import commands
 from discord import app_commands
 import aiosqlite
 import os
-import logging
 from typing import Optional, Dict, Tuple, List
 import asyncio
 import random
-
-# Setup logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger('ban_cog')
 
 class BanCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.db_path = None
-        self.config_cache = {}  # In-memory cache for faster access
-        self.cache_ready = asyncio.Event()  # To signal when cache is ready
-        self.responses = []  # Ban responses from file
-        self.last_modified_time = 0  # Track the last modified time of responses.txt
-        
-        # Hardcoded DM messages to send before banning
+        self.config_cache = {}
+        self.cache_ready = asyncio.Event()
+        self.responses = []
+        self.last_modified_time = 0
         self.ban_dm_messages = [
             "Congratulations! You've won a lifetime ban from {server}! 🎉",
             "Achievement unlocked: Get banned from {server}! 🏆",
@@ -39,14 +32,10 @@ class BanCog(commands.Cog):
             "Your {server} free trial has expired... permanently.",
             "Error 403: Access to {server} forbidden. Reason: You're banned!"
         ]
-        
         self.load_responses()
-        
-        # Start the background task to watch for file changes
         self.file_watcher_task = None
-        
+
     async def watch_responses_file(self):
-        """Watch for changes in responses.txt file"""
         last_modified = 0
         while True:
             try:
@@ -55,36 +44,24 @@ class BanCog(commands.Cog):
                     if current_modified > last_modified:
                         with open("responses.txt", "r") as f:
                             self.responses = [line.strip() for line in f if line.strip()]
-                        logger.info(f"Automatically reloaded {len(self.responses)} ban responses")
                         last_modified = current_modified
-            except Exception as e:
-                logger.error(f"Error watching responses file: {e}")
-            await asyncio.sleep(1)  # Check every second
+            except:
+                pass
+            await asyncio.sleep(1)
 
     def load_responses(self):
-        """Initial load of ban responses"""
         try:
             with open("responses.txt", "r") as f:
                 self.responses = [line.strip() for line in f if line.strip()]
-            logger.info(f"Loaded {len(self.responses)} ban responses")
-        except Exception as e:
-            logger.error(f"Error loading ban responses: {e}")
+        except:
             self.responses = ["@user has been banned for [reason]"]
-            
 
-        
     async def setup_database(self):
-        # Create database folder if it doesn't exist
         database_folder = "database"
         if not os.path.exists(database_folder):
             os.makedirs(database_folder)
-            logger.info(f"Created database folder: {database_folder}")
-            
-        # Set database path
         self.db_path = os.path.join(database_folder, "ban_config.db")
-        
         try:
-            # Create database and table if they don't exist
             async with aiosqlite.connect(self.db_path) as db:
                 await db.execute('''
                     CREATE TABLE IF NOT EXISTS ban_config (
@@ -94,30 +71,20 @@ class BanCog(commands.Cog):
                     )
                 ''')
                 await db.commit()
-            
-            # Load all configurations into cache
             await self.load_config_cache()
-            logger.info(f"Database setup completed: {self.db_path}")
-            
-        except Exception as e:
-            logger.error(f"Database setup error: {e}")
-            self.cache_ready.set()  # Signal cache is ready even though there was an error
-    
+        except:
+            self.cache_ready.set()
+
     async def load_config_cache(self):
-        """Load all configurations into memory for faster access"""
         try:
             async with aiosqlite.connect(self.db_path) as db:
                 async with db.execute('SELECT guild_id, command, response FROM ban_config') as cursor:
                     records = await cursor.fetchall()
                     self.config_cache = {str(record[0]): (record[1], record[2]) for record in records}
-                    logger.info(f"Loaded {len(self.config_cache)} ban configurations into cache")
-            self.cache_ready.set()  # Signal cache is ready
-        except Exception as e:
-            logger.error(f"Error loading config cache: {e}")
-            self.cache_ready.set()  # Signal anyway to prevent hangs
+            self.cache_ready.set()
+        except:
+            self.cache_ready.set()
 
-    # Removed reload_responses slash command as responses are now reloaded automatically
-        
     @app_commands.command(name="setban", description="Set custom ban command")
     @app_commands.checks.has_permissions(administrator=True)
     async def setban(
@@ -127,31 +94,23 @@ class BanCog(commands.Cog):
     ):
         if not interaction.guild:
             return await interaction.response.send_message("This command can only be used in a server!", ephemeral=True)
-            
-        # Store the configuration in database
         try:
-            # Use a placeholder for response since we'll be using random responses from file
             placeholder_response = "Random response will be used"
-            
             async with aiosqlite.connect(self.db_path) as db:
                 await db.execute(
                     "INSERT OR REPLACE INTO ban_config (guild_id, command, response) VALUES (?, ?, ?)",
                     (interaction.guild.id, command, placeholder_response)
                 )
                 await db.commit()
-            
-            # Update cache
             self.config_cache[str(interaction.guild.id)] = (command, placeholder_response)
-            
-            # Show number of loaded responses
             response_count = len(self.responses)
-            
             await interaction.response.send_message(
-                f"<a:heartspar:1335854160322498653> Ban configuration updated!\nCommand: `.{command}`\nThe bot will randomly choose from {response_count} different ban messages when this command is used.",
+                f"<a:heartspar:1335854160322498653> Ban configuration updated!\n"
+                f"Command: `.{command}`\n"
+                f"The bot will randomly choose from {response_count} different ban messages when this command is used.",
                 ephemeral=True
             )
-        except Exception as e:
-            logger.error(f"Error saving ban config: {e}")
+        except:
             await interaction.response.send_message(
                 "<a:heartspar:1335854160322498653> An error occurred while updating the ban configuration.",
                 ephemeral=True
@@ -161,24 +120,13 @@ class BanCog(commands.Cog):
     async def on_message(self, message: discord.Message):
         if not message.guild or message.author.bot:
             return
-            
-        # Debug logging disabled
-        # logger.info(f"Message received: {message.content}")
-            
-        # Check if message starts with a dot
         if not message.content.startswith('.'):
             return
-            
-        logger.info(f"Message starts with dot: {message.content}")
-        
-        # Wait for cache to be ready
+
         await self.cache_ready.wait()
-            
-        # Get custom command configuration from cache first
         guild_id = str(message.guild.id)
         config = self.config_cache.get(guild_id)
-        
-        # If not in cache, try getting from database
+
         if not config:
             try:
                 async with aiosqlite.connect(self.db_path) as db:
@@ -189,144 +137,84 @@ class BanCog(commands.Cog):
                         row = await cursor.fetchone()
                         if row:
                             config = (row[0], row[1])
-                            # Update cache
                             self.config_cache[guild_id] = config
-            except Exception as e:
-                logger.error(f"Database query error: {e}")
-        
-        logger.info(f"Config result: {config}")
-                
+            except:
+                pass
+
         if not config:
             return
-            
+
         command, response = config
-        logger.info(f"Configured command: '{command}', Message: '{message.content}'")
-        
-        # Check if message matches custom command (with dot prefix)
         dot_command = '.' + command
         if not message.content.startswith(dot_command):
-            logger.info(f"Command mismatch: expected '{dot_command}', got '{message.content}'")
             return
-            
-        # Check permissions - only administrators can use this command
+
         if not isinstance(message.author, discord.Member) or not message.author.guild_permissions.administrator:
             return await message.reply("<a:heartspar:1335854160322498653> You don't have permission to use this command. Only administrators can use it.")
-            
-        # Parse mention/user ID and reason - account for dot prefix
+
         content = message.content[len(dot_command):].strip()
-        logger.info(f"Content after command: '{content}'")
-        
-        # First try to find a mention
         target = None
-        
+
         if message.mentions:
             target = message.mentions[0]
-            logger.info(f"Target mention: {target.mention}")
             reason = content[content.find(target.mention) + len(target.mention):].strip()
         else:
-            # No mention found, try to extract a user ID
             parts = content.split()
             if not parts:
                 return await message.reply("<a:heartspar:1335854160322498653> You need to mention a user or provide a user ID to ban.")
-                
             potential_id = parts[0].strip()
-            
-            # Remove any extra characters that might be in the ID
             for char in ['<', '>', '@', '!']:
                 potential_id = potential_id.replace(char, '')
-                
-            logger.info(f"Potential user ID: {potential_id}")
-            
             try:
                 user_id = int(potential_id)
-                # Try to fetch the user
                 try:
                     target = await self.bot.fetch_user(user_id)
-                    logger.info(f"Found user by ID: {target}")
-                    # Get reason from the remaining content
                     reason = ' '.join(parts[1:]).strip()
                 except discord.NotFound:
                     return await message.reply("<a:heartspar:1335854160322498653> Could not find a user with that ID.")
-                except Exception as e:
-                    logger.error(f"Error fetching user by ID: {e}")
+                except:
                     return await message.reply("<a:heartspar:1335854160322498653> An error occurred while trying to find the user.")
             except ValueError:
                 return await message.reply("<a:heartspar:1335854160322498653> Invalid user ID or mention. Please provide a valid user mention or ID.")
-        
+
         if not target:
             return await message.reply("<a:heartspar:1335854160322498653> You need to mention a user or provide a user ID to ban.")
-            
-        # If no reason is provided, use a default reason
         if not reason:
             reason = "No reason provided"
-            
+
         try:
-            # Check if bot has ban permissions
             if not message.guild.me.guild_permissions.ban_members:
                 return await message.reply("<a:heartspar:1335854160322498653> I don't have the ban permission in this server.")
-                
-            # Check if target can be banned
             if isinstance(target, discord.Member) and target.top_role >= message.guild.me.top_role:
                 return await message.reply("<a:heartspar:1335854160322498653> I cannot ban this user as their role is higher than or equal to mine.")
-                
-            # Send DM to the user before banning them
-            dm_sent = False
             try:
-                # Select a random DM message from the list
                 random_dm_message = random.choice(self.ban_dm_messages)
-                # Format the message with the server name
                 formatted_dm_message = random_dm_message.format(server=message.guild.name)
-                # Send the DM and wait for it to complete
                 await target.send(formatted_dm_message)
-                dm_sent = True
-                logger.info(f"Sent ban DM to {target.name}#{target.discriminator if hasattr(target, 'discriminator') else '0'} ({target.id})")
-                # Add a small delay to ensure DM is processed before ban
                 await asyncio.sleep(1)
-            except discord.Forbidden:
-                logger.warning(f"Could not send DM to {target} - DMs closed or blocked")
-            except Exception as e:
-                logger.error(f"Error sending DM to {target}: {e}")
-            
-            # Log the sequence of events
-            if dm_sent:
-                logger.info(f"DM sent successfully, now proceeding to ban {target.id}")
-            else:
-                logger.info(f"DM could not be sent, proceeding to ban {target.id} anyway")
-                
-            # Ban the user after attempting to send DM
+            except:
+                pass
             await message.guild.ban(target, reason=f"Banned by {message.author}: {reason}")
-            
-            # Get a random response from the responses.txt file
+
             if self.responses:
                 random_response = random.choice(self.responses)
                 formatted_response = random_response.replace("@user", target.mention).replace("[reason]", reason)
             else:
-                # Fallback to stored response if no responses are loaded from file
                 formatted_response = response.replace("@user", target.mention).replace("[reason]", reason)
-                
-            logger.info(f"Selected ban response: {formatted_response}")
+
             await message.channel.send(formatted_response)
-            
         except discord.Forbidden:
             await message.reply("<a:heartspar:1335854160322498653> I don't have permission to ban that user.")
-        except Exception as e:
-            logger.error(f"Error banning user: {e}")
+        except:
             await message.reply("<a:heartspar:1335854160322498653> An error occurred while trying to ban the user. Make sure I have the proper permissions.")
 
     async def cog_load(self):
-        # Setup database
         await self.setup_database()
-        
-        # Start the file watcher task
         self.file_watcher_task = asyncio.create_task(self.watch_responses_file())
-        logger.info("Started response file watcher task")
-        
+
     async def cog_unload(self):
-        # Cancel the file wwatcher task
         if self.file_watcher_task and not self.file_watcher_task.done():
             self.file_watcher_task.cancel()
-            
-        logger.info("Ban cog unloaded")
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(BanCog(bot))
