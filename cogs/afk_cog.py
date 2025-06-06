@@ -29,7 +29,7 @@ class MentionPaginator(discord.ui.View):
             - "When: {relative_time}" computed from the mention timestamp,
             - "Message: {msg_content}" from the stored message.
       • Thumbnail: The mentioner’s avatar (if available)
-      • embed.timestamp is set dynamically so Discord displays the current time in the corner.
+      • embed.timestamp is set dynamically so Discord displays current time in the corner.
       • Footer: Displays the bot’s name.
       • Uses a random non-repeating color from a 30-color pool for each page.
     """
@@ -42,7 +42,7 @@ class MentionPaginator(discord.ui.View):
         self.total_pages = len(mentions)
         self.message: Optional[discord.Message] = None
 
-        # Predefined pool of 30 unique colors
+        # Predefined pool of 30 unique colors (as hex ints)
         color_pool = [
             0xFF5733, 0x33FF57, 0x3357FF, 0xFF33A1, 0xA133FF, 0x33FFA1, 0xA1FF33,
             0x5733FF, 0xFF8C33, 0x8C33FF, 0x33FF8C, 0xFFC733, 0x33C7FF, 0xC733FF,
@@ -50,12 +50,16 @@ class MentionPaginator(discord.ui.View):
             0x99FF33, 0x3399FF, 0xFF6633, 0x6633FF, 0x33FF66, 0xFF9933, 0x9933FF,
             0x66CCFF, 0xCCFF66
         ]
+
         if self.total_pages <= len(color_pool):
             self.colors = random.sample(color_pool, self.total_pages)
         else:
             self.colors = random.sample(color_pool, len(color_pool))
             extra_needed = self.total_pages - len(color_pool)
             self.colors += random.choices(color_pool, k=extra_needed)
+
+        # Immediately set button states before sending the initial message
+        self._update_buttons()
 
     @staticmethod
     def format_time_ago(diff: timedelta) -> str:
@@ -78,14 +82,14 @@ class MentionPaginator(discord.ui.View):
             initial_embed = self.get_page_content()
             if isinstance(ctx, discord.Interaction):
                 await ctx.response.send_message(
-                    content=f"{self.author.mention}, here's your AFK mention summary:",
+                    content=f"{self.author.mention}, here’s your AFK mention summary:",
                     embed=initial_embed,
                     view=self
                 )
                 self.message = await ctx.original_response()
             else:
                 self.message = await ctx.send(
-                    content=f"{self.author.mention}, here's your AFK mention summary:",
+                    content=f"{self.author.mention}, here’s your AFK mention summary:",
                     embed=initial_embed,
                     view=self
                 )
@@ -97,23 +101,14 @@ class MentionPaginator(discord.ui.View):
         """Build the embed for the current mention."""
         mention = self.mentions[self.current_page]
 
-        # Extract mention data
         guild_id = mention["guild_id"]
         channel_id = mention["channel_id"]
         message_id = mention["message_id"]
-        created_at_str = mention["created_at"]
+        mention_time: datetime = mention["created_at"]  # Now a datetime object
         mentioner_id = mention["mentioned_by"]
 
         # Construct jump-to-message URL
         jump_url = f"https://discord.com/channels/{guild_id}/{channel_id}/{message_id}"
-
-        # Convert timestamp from ISO to datetime (ensure timezone aware)
-        try:
-            mention_time = datetime.fromisoformat(created_at_str)
-            if mention_time.tzinfo is None:
-                mention_time = mention_time.replace(tzinfo=timezone.utc)
-        except ValueError:
-            mention_time = datetime.now(timezone.utc)
 
         # Compute relative time based on the mention's timestamp
         time_diff = datetime.now(timezone.utc) - mention_time
@@ -137,43 +132,48 @@ class MentionPaginator(discord.ui.View):
             color=embed_color
         )
 
-        # Set embed.timestamp to current time for dynamic display in Discord's UI
+        # Set embed.timestamp to current time for dynamic display
         embed.timestamp = datetime.now(timezone.utc)
 
-        # Set footer to show only the bot's name (the dynamic timestamp will be shown automatically)
+        # Footer: show only bot’s name
         if self.bot.user and self.bot.user.avatar:
             embed.set_footer(text=f"{self.bot.user.name}", icon_url=self.bot.user.avatar.url)
         else:
             embed.set_footer(text=f"{self.bot.user.name}")
 
-        # Thumbnail: mentioner's avatar (if available)
+        # Thumbnail: mentioner’s avatar (if available)
         if mentioner and mentioner.avatar:
             embed.set_thumbnail(url=mentioner.avatar.url)
 
         return embed
 
-    @discord.ui.button(emoji="<:sukoon_left_arro:1345075074012676219>", style=discord.ButtonStyle.secondary, disabled=True)
+    @discord.ui.button(emoji="<:sukoon_left_arro:1345075074012676219>",
+                       style=discord.ButtonStyle.secondary,
+                       disabled=True)
     async def prev_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         """Show the previous mention."""
         if interaction.user.id != self.author.id:
             return await interaction.response.send_message("You cannot use these controls.", ephemeral=True)
+
         self.current_page = max(0, self.current_page - 1)
         await self._update_buttons()
         await interaction.response.edit_message(embed=self.get_page_content(), view=self)
 
-    @discord.ui.button(emoji="<:sukoon_right_arro:1345075121039216693>", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(emoji="<:sukoon_right_arro:1345075121039216693>",
+                       style=discord.ButtonStyle.secondary)
     async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         """Show the next mention."""
         if interaction.user.id != self.author.id:
             return await interaction.response.send_message("You cannot use these controls.", ephemeral=True)
+
         self.current_page = min(self.total_pages - 1, self.current_page + 1)
         await self._update_buttons()
         await interaction.response.edit_message(embed=self.get_page_content(), view=self)
 
     async def _update_buttons(self):
         """Enable or disable navigation buttons based on the current page."""
-        self.children[0].disabled = self.current_page == 0
-        self.children[1].disabled = self.current_page == (self.total_pages - 1)
+        self.children[0].disabled = (self.current_page == 0)
+        self.children[1].disabled = (self.current_page == (self.total_pages - 1))
 
     async def on_timeout(self):
         """Disable all buttons when the view times out."""
@@ -210,17 +210,23 @@ class AFKChoiceView(discord.ui.View):
         if interaction.user.id != self.author.id:
             await interaction.response.send_message("This is not for you.", ephemeral=True)
             return
-        success = await self.afk_cog.set_afk_status(interaction.user.id, self.afk_reason, scope="global", server_id=None)
+
+        success = await self.afk_cog.set_afk_status(
+            interaction.user.id,
+            self.afk_reason,
+            scope="global",
+            server_id=None
+        )
         if success:
             embed = discord.Embed(
                 description=f"<a:sukoon_whitetick:1344600976962748458> | Successfully set your AFK status for reason: {self.afk_reason}",
                 color=random.randint(0, 0xFFFFFF)
             )
             await interaction.response.send_message(embed=embed)
-            # Delete the original message with the buttons.
             await interaction.message.delete()
         else:
             await interaction.response.send_message("Failed to set AFK status.", ephemeral=True)
+
         self.stop()
 
     @discord.ui.button(label="Server Only", style=discord.ButtonStyle.secondary)
@@ -228,21 +234,28 @@ class AFKChoiceView(discord.ui.View):
         if interaction.user.id != self.author.id:
             await interaction.response.send_message("This is not for you.", ephemeral=True)
             return
+
         server_id = interaction.guild.id if interaction.guild else None
         if server_id is None:
             await interaction.response.send_message("Server information is not available.", ephemeral=True)
             return
-        success = await self.afk_cog.set_afk_status(interaction.user.id, self.afk_reason, scope="server", server_id=server_id)
+
+        success = await self.afk_cog.set_afk_status(
+            interaction.user.id,
+            self.afk_reason,
+            scope="server",
+            server_id=server_id
+        )
         if success:
             embed = discord.Embed(
                 description=f"<a:sukoon_whitetick:1344600976962748458> | Successfully set your AFK status for reason: {self.afk_reason}",
                 color=random.randint(0, 0xFFFFFF)
             )
             await interaction.response.send_message(embed=embed)
-            # Delete the original message with the buttons.
             await interaction.message.delete()
         else:
             await interaction.response.send_message("Failed to set AFK status.", ephemeral=True)
+
         self.stop()
 
 class AFK(commands.Cog):
@@ -288,6 +301,7 @@ class AFK(commands.Cog):
 
                 await self.afk_collection.create_index("user_id", unique=True)
                 await self.mentions_collection.create_index([("user_id", 1), ("created_at", 1)])
+
                 logger.info("MongoDB connection established successfully")
                 return
             except Exception as e:
@@ -331,7 +345,7 @@ class AFK(commands.Cog):
                 return
             cutoff = datetime.now(timezone.utc) - timedelta(days=self.mention_retention_days)
             result = await self.mentions_collection.delete_many({
-                "created_at": {"$lt": cutoff.isoformat()}
+                "created_at": {"$lt": cutoff}
             })
             if result.deleted_count:
                 logger.info(f"Cleaned up {result.deleted_count} old mention records")
@@ -341,7 +355,7 @@ class AFK(commands.Cog):
     @tasks.loop(hours=1)
     async def load_nicknames_cache(self):
         """
-        On startup, load all AFK records from the database into cache and reapply "[AFK]" nicknames.
+        Every hour, load all AFK records from the database into cache and reapply “[AFK]” nicknames.
         Ensures that if the bot restarts while users remain AFK, their nickname stays prefixed.
         """
         if self.afk_collection is None:
@@ -354,17 +368,11 @@ class AFK(commands.Cog):
                 scope = doc.get("scope", "global")
                 server_id = doc.get("server_id")
                 reason = doc.get("reason", "")
-                # Ensure timestamp is a string before parsing
-                timestamp_value = doc["timestamp"]
-                if not isinstance(timestamp_value, str):
-                    logger.warning(f"Invalid timestamp format for user {user_id}: {timestamp_value}, converting to string")
-                    timestamp_value = str(timestamp_value)
-                timestamp = datetime.fromisoformat(timestamp_value)
+                timestamp: datetime = doc["timestamp"]
                 if timestamp.tzinfo is None:
                     timestamp = timestamp.replace(tzinfo=timezone.utc)
                 old_nick = doc.get("old_nick")
 
-                # Populate cache
                 self._cache[user_id] = {
                     "reason": reason,
                     "timestamp": timestamp,
@@ -373,7 +381,6 @@ class AFK(commands.Cog):
                     "old_nick": old_nick
                 }
 
-                # Reapply "[AFK]" nickname
                 if scope == "server" and server_id:
                     guild = self.bot.get_guild(server_id)
                     if guild:
@@ -389,7 +396,6 @@ class AFK(commands.Cog):
                             except Exception as e:
                                 logger.error(f"Error reapplying AFK nickname for {member.id} in guild {guild.id}: {e}")
                 else:
-                    # Global: attempt in every guild the bot shares
                     for guild in self.bot.guilds:
                         member = guild.get_member(user_id)
                         if member:
@@ -402,9 +408,68 @@ class AFK(commands.Cog):
                                 continue
                             except Exception as e:
                                 logger.error(f"Error reapplying AFK nickname for {member.id} in guild {guild.id}: {e}")
-            logger.info("Reapplied AFK nicknames for existing AFK users on startup.")
+            logger.info("Reapplied AFK nicknames for existing AFK users on schedule.")
         except Exception as e:
             logger.error(f"Error loading nicknames cache: {e}")
+
+    async def _reapply_nicknames_once(self):
+        """
+        One-time pass to load all AFK records from the database into cache and reapply “[AFK]” nicknames.
+        Called once at startup before tasks begin.
+        """
+        if self.afk_collection is None:
+            return
+
+        try:
+            cursor = self.afk_collection.find({})
+            async for doc in cursor:
+                user_id = doc["user_id"]
+                scope = doc.get("scope", "global")
+                server_id = doc.get("server_id")
+                reason = doc.get("reason", "")
+                timestamp: datetime = doc["timestamp"]
+                if timestamp.tzinfo is None:
+                    timestamp = timestamp.replace(tzinfo=timezone.utc)
+                old_nick = doc.get("old_nick")
+
+                self._cache[user_id] = {
+                    "reason": reason,
+                    "timestamp": timestamp,
+                    "scope": scope,
+                    "server_id": server_id,
+                    "old_nick": old_nick
+                }
+
+                if scope == "server" and server_id:
+                    guild = self.bot.get_guild(server_id)
+                    if guild:
+                        member = guild.get_member(user_id)
+                        if member:
+                            display_str = member.display_name
+                            truncated = display_str if len(display_str) <= 25 else display_str[:25] + "…"
+                            new_nick = f"[AFK] {truncated}"
+                            try:
+                                await member.edit(nick=new_nick)
+                            except discord.Forbidden:
+                                logger.warning(f"Missing permissions to reapply AFK nickname for {member} in guild {guild.id}")
+                            except Exception as e:
+                                logger.error(f"Error reapplying AFK nickname for {member.id} in guild {guild.id}: {e}")
+                else:
+                    for guild in self.bot.guilds:
+                        member = guild.get_member(user_id)
+                        if member:
+                            display_str = member.display_name
+                            truncated = display_str if len(display_str) <= 25 else display_str[:25] + "…"
+                            new_nick = f"[AFK] {truncated}"
+                            try:
+                                await member.edit(nick=new_nick)
+                            except discord.Forbidden:
+                                continue
+                            except Exception as e:
+                                logger.error(f"Error reapplying AFK nickname for {member.id} in guild {guild.id}: {e}")
+            logger.info("Reapplied AFK nicknames for existing users (one-time startup pass).")
+        except Exception as e:
+            logger.error(f"Error in one-time nickname reappliance: {e}")
 
     async def get_afk_status(self, user_id: int) -> Optional[Dict[str, Any]]:
         """Retrieve a user's AFK status, checking cache first."""
@@ -416,52 +481,50 @@ class AFK(commands.Cog):
                 del self._cache[user_id]
 
             result = await self.afk_collection.find_one({"user_id": user_id})
-            if result:
-                reason = result["reason"]
-                # Ensure timestamp is a string before parsing
-                timestamp_value = result["timestamp"]
-                if not isinstance(timestamp_value, str):
-                    logger.warning(f"Invalid timestamp format for user {user_id}: {timestamp_value}, converting to string")
-                    timestamp_value = str(timestamp_value)
-                timestamp = datetime.fromisoformat(timestamp_value)
-                if timestamp.tzinfo is None:
-                    timestamp = timestamp.replace(tzinfo=timezone.utc)
-                old_nick = result.get("old_nick")
-                record = {
-                    "reason": reason,
-                    "timestamp": timestamp,
-                    "scope": result.get("scope", "global"),
-                    "server_id": result.get("server_id"),
-                    "old_nick": old_nick
-                }
-                self._cache[user_id] = record
-                return record
-            return None
+            if not result:
+                return None
+
+            reason = result["reason"]
+            timestamp: datetime = result["timestamp"]
+            if timestamp.tzinfo is None:
+                timestamp = timestamp.replace(tzinfo=timezone.utc)
+            old_nick = result.get("old_nick")
+            record = {
+                "reason": reason,
+                "timestamp": timestamp,
+                "scope": result.get("scope", "global"),
+                "server_id": result.get("server_id"),
+                "old_nick": old_nick
+            }
+            self._cache[user_id] = record
+            return record
         except Exception as e:
             logger.error(f"Error fetching AFK status for {user_id}: {e}")
             return None
 
-    async def set_afk_status(self, user_id: int, reason: str, scope: str = "global", server_id: Optional[int] = None) -> bool:
+    async def set_afk_status(
+        self,
+        user_id: int,
+        reason: str,
+        scope: str = "global",
+        server_id: Optional[int] = None
+    ) -> bool:
         """
         Set or update a user's AFK status with a scope (global or server).
         Also: record their old nickname and change it to "[AFK] <display_name>".
         """
         try:
-            # 1) Clean the reason and timestamp
             reason = discord.utils.escape_markdown(reason.strip())[:self.max_reason_length]
             now = datetime.now(timezone.utc)
 
-            # 2) Determine and store the old nickname, then change to "[AFK] <display_name>"
             old_nick: Optional[str] = None
 
             if scope == "server":
-                # Only change nickname in the specified server
                 guild = self.bot.get_guild(server_id) if server_id else None
                 if guild:
                     member = guild.get_member(user_id)
                     if member:
                         old_nick = member.nick
-                        # Truncate if too long: Discord nickname limit is 32 characters
                         display_str = member.display_name
                         truncated = display_str if len(display_str) <= 25 else display_str[:25] + "…"
                         new_nick = f"[AFK] {truncated}"
@@ -472,7 +535,6 @@ class AFK(commands.Cog):
                         except Exception as e:
                             logger.error(f"Error setting AFK nickname for {member.id} in guild {guild.id}: {e}")
             else:  # global
-                # Try across all guilds; record the first old_nick we find
                 for guild in self.bot.guilds:
                     member = guild.get_member(user_id)
                     if member:
@@ -488,11 +550,11 @@ class AFK(commands.Cog):
                         except Exception as e:
                             logger.error(f"Error setting AFK nickname for {member.id} in guild {guild.id}: {e}")
 
-            # 3) Prepare the document to save (including old_nick)
             data = {
+                "user_id": user_id,
                 "reason": reason,
-                "timestamp": now.isoformat(),
-                "updated_at": now.isoformat(),
+                "timestamp": now,
+                "updated_at": now,
                 "scope": scope,
                 "server_id": server_id if scope == "server" else None,
                 "old_nick": old_nick
@@ -500,11 +562,10 @@ class AFK(commands.Cog):
 
             await self.afk_collection.update_one(
                 {"user_id": user_id},
-                {"$set": data, "$setOnInsert": {"user_id": user_id}},
+                {"$set": data},
                 upsert=True
             )
 
-            # 4) Update cache (include old_nick)
             self._cache[user_id] = {
                 "reason": reason,
                 "timestamp": now,
@@ -529,9 +590,10 @@ class AFK(commands.Cog):
 
     @commands.command()
     async def afk(self, ctx: commands.Context, *, reason: str = "AFK"):
-        """Command to set your AFK status with an optional reason.
-           Instead of immediately setting the status, this command now prompts you to choose
-           whether you want the AFK to be global or server only.
+        """
+        Command to set your AFK status with an optional reason.
+        Instead of immediately setting the status, this command now prompts you to choose
+        whether you want the AFK to be global or server only.
         """
         try:
             embed = discord.Embed(
@@ -547,17 +609,15 @@ class AFK(commands.Cog):
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
-        """Check messages for mentions of AFK users, handle AFK returns, and still allow commands to run."""
+        """Check messages for mentions of AFK users, handle AFK returns, and allow commands to run."""
         if message.author.bot:
             return
 
-        # 1) If this is a valid command, pass it to the command processor and return
         ctx = await self.bot.get_context(message)
         if ctx.valid:
             await self.bot.process_commands(message)
             return
 
-        # 2) Otherwise, handle AFK mention/return logic
         try:
             if message.mentions:
                 await self._handle_mentions(message)
@@ -565,28 +625,28 @@ class AFK(commands.Cog):
         except Exception as e:
             logger.error(f"Error in on_message: {e}")
 
-        # 3) Finally, in case there are commands not caught by ctx.valid
-        await self.bot.process_commands(message)
-
     async def _handle_mentions(self, message: discord.Message):
         """Record a mention if the mentioned user is AFK."""
         for mention in message.mentions:
             if mention.bot:
                 continue
             afk_status = await self.get_afk_status(mention.id)
-            if afk_status:
-                if afk_status["scope"] == "server":
-                    if not message.guild or message.guild.id != afk_status["server_id"]:
-                        continue  # Skip if the AFK is set only for a specific server
-                reason = afk_status["reason"]
-                afk_timestamp = afk_status["timestamp"]
-                await self._record_mention(mention, message)
-                rel_time = self.clean_time_format(afk_timestamp)
-                embed = discord.Embed(
-                    description=f"{mention.mention} is AFK: {reason} ({rel_time})",
-                    color=random.randint(0, 0xFFFFFF)
-                )
-                await message.channel.send(embed=embed)
+            if not afk_status:
+                continue
+
+            if afk_status["scope"] == "server":
+                if not message.guild or message.guild.id != afk_status["server_id"]:
+                    continue
+
+            reason = afk_status["reason"]
+            afk_timestamp = afk_status["timestamp"]
+            await self._record_mention(mention, message)
+            rel_time = self.clean_time_format(afk_timestamp)
+            embed = discord.Embed(
+                description=f"{mention.mention} is AFK: {reason} ({rel_time})",
+                color=random.randint(0, 0xFFFFFF)
+            )
+            await message.channel.send(embed=embed)
 
     def clean_time_format(self, timestamp: datetime) -> str:
         """Return a human-friendly relative time string for a given timestamp."""
@@ -594,28 +654,32 @@ class AFK(commands.Cog):
         return MentionPaginator.format_time_ago(diff)
 
     async def _handle_afk_return(self, message: discord.Message):
-        """If a user who is AFK sends a message, revert their nickname, remove their AFK status, and send mention summary."""
+        """
+        If a user who is AFK sends a message, revert their nickname, remove their AFK status,
+        and send mention summary.
+        """
         afk_status = await self.get_afk_status(message.author.id)
-        if afk_status:
-            if afk_status["scope"] == "server":
-                if not message.guild or message.guild.id != afk_status["server_id"]:
-                    return  # Do not remove AFK status if the message is not in the specified server
+        if not afk_status:
+            return
 
-            # 1) Revert the nickname before removing AFK
-            old_nick = afk_status.get("old_nick")
-            scope = afk_status["scope"]
-            server_id = afk_status.get("server_id")
-            await self._revert_nickname(message.author.id, old_nick, scope, server_id)
+        if afk_status["scope"] == "server":
+            if not message.guild or message.guild.id != afk_status["server_id"]:
+                return
 
-            # 2) Notify return and send mention summary
-            await self._send_return_message(message, afk_status["timestamp"])
-            await self._send_mention_summary(
-                message,
-                afk_status["timestamp"],
-                afk_status["scope"],
-                afk_status.get("server_id")
-            )
-            await self.remove_afk_status(message.author.id)
+        old_nick = afk_status.get("old_nick")
+        scope = afk_status["scope"]
+        server_id = afk_status.get("server_id")
+        await self._revert_nickname(message.author.id, old_nick, scope, server_id)
+
+        await self._send_return_message(message, afk_status["timestamp"])
+        await self._send_mention_summary(
+            message,
+            afk_status["timestamp"],
+            afk_status["scope"],
+            afk_status.get("server_id")
+        )
+
+        await self.remove_afk_status(message.author.id)
 
     async def _record_mention(self, mentioned_user: discord.Member, message: discord.Message):
         """Record a mention of an AFK user in the database."""
@@ -626,7 +690,7 @@ class AFK(commands.Cog):
                 "channel_id": message.channel.id,
                 "guild_id": message.guild.id,
                 "mentioned_by": message.author.id,
-                "created_at": datetime.now(timezone.utc).isoformat(),
+                "created_at": datetime.now(timezone.utc),
                 "message_content": message.content[:200]
             }
             await self.mentions_collection.insert_one(data)
@@ -655,21 +719,21 @@ class AFK(commands.Cog):
                 logger.error("Mentions collection is not initialized.")
                 return
 
-            query = {
+            query: Dict[str, Any] = {
                 "user_id": message.author.id,
-                "created_at": {"$gte": afk_start_time.isoformat()}
+                "created_at": {"$gte": afk_start_time}
             }
             if scope == "server" and server_id is not None:
                 query["guild_id"] = server_id
 
-            mentions = await self.mentions_collection.find(query).to_list(length=None)
+            mentions_list = await self.mentions_collection.find(query).to_list(length=None)
 
-            if not mentions:
+            if not mentions_list:
                 logger.info(f"No mentions found for user {message.author.id} during AFK period.")
                 return
 
             valid_mentions = []
-            for m in mentions:
+            for m in mentions_list:
                 if all(k in m for k in ["message_id", "channel_id", "guild_id", "mentioned_by", "created_at"]):
                     valid_mentions.append(m)
                 else:
@@ -704,7 +768,7 @@ class AFK(commands.Cog):
         Revert the user's nickname when they return from AFK.
         - If scope == "server", only revert in that guild.
         - If scope == "global", attempt in all guilds where the bot can.
-        old_nick may be None, which means “remove any custom nickname and show the default username.”
+        old_nick may be None, which means “remove any custom nickname and show default username.”
         """
         if scope == "server" and server_id:
             guild = self.bot.get_guild(server_id)
@@ -712,7 +776,7 @@ class AFK(commands.Cog):
                 member = guild.get_member(user_id)
                 if member:
                     try:
-                        await member.edit(nick=old_nick)  # None → remove nickname entirely
+                        await member.edit(nick=old_nick)
                     except discord.Forbidden:
                         logger.warning(f"Cannot revert nickname for {member} in guild {guild.id} (missing perms).")
                     except Exception as e:
@@ -743,13 +807,19 @@ class AFK(commands.Cog):
             logger.error(f"Error during cog unload: {e}")
 
 async def setup(bot: commands.Bot):
-    """Initialize and load the AFK cog, then reapply nicknames for any existing AFK users."""
+    """
+    Initialize and load the AFK cog, then reapply nicknames for any existing AFK users.
+    """
     try:
         cog = AFK(bot)
         await cog.init_db()
-        # Load AFK records and reapply “[AFK]” nicknames on startup
-        await cog.load_nicknames_cache()
+
+        # One-time reapply of nicknames on startup
+        await cog._reapply_nicknames_once()
+
+        # Start background tasks (which include recurring reapplication)
         cog.start_tasks()
+
         await bot.add_cog(cog)
         logger.info("AFK cog loaded successfully.")
     except Exception as e:
