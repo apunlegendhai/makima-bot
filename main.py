@@ -72,7 +72,6 @@ class DiscordBot(commands.Bot):
         super().__init__(command_prefix=".", intents=intents)
         self.session: Optional[aiohttp.ClientSession] = None
         self.command_locks: Dict[str, asyncio.Lock] = {}
-        self._shutdown_event = asyncio.Event()
         self._ready_once = False
         self._synced_commands: List[discord.app_commands.Command] = []
 
@@ -132,15 +131,14 @@ class DiscordBot(commands.Bot):
         print("\033[31mBot is shutting down...\033[0m")
         print("\033[33m" + "=" * 50 + "\033[0m\n")
 
-        self._shutdown_event.set()
-        if self.session:
+        if self.session and not self.session.closed:
             await self.session.close()
 
         for guild in self.guilds:
             vc = guild.voice_client
             if vc:
                 try:
-                    await asyncio.wait_for(vc.disconnect(force=True), timeout=5.0)
+                    await asyncio.wait_for(vc.disconnect(force=True), timeout=10.0)
                 except asyncio.TimeoutError:
                     logging.warning(f"Timeout while disconnecting VC in guild {guild.id}")
                 except Exception as e:
@@ -148,18 +146,17 @@ class DiscordBot(commands.Bot):
 
         await super().close()
 
-    def signal_handler(self):
-        logging.info("Received shutdown signal")
-        asyncio.create_task(self.close())
-
-    @property
-    def is_shutting_down(self) -> bool:
-        return self._shutdown_event.is_set()
-
     async def get_command_lock(self, user_id: int, command_name: str) -> asyncio.Lock:
         key = f"{user_id}:{command_name}"
         if key not in self.command_locks:
             self.command_locks[key] = asyncio.Lock()
+        
+        # Cleanup old locks periodically
+        if len(self.command_locks) > 1000:
+            active_locks = {k: v for k, v in self.command_locks.items() if v.locked()}
+            self.command_locks.clear()
+            self.command_locks.update(active_locks)
+            
         return self.command_locks[key]
 
     async def load_cogs(self) -> None:
@@ -178,7 +175,8 @@ class DiscordBot(commands.Bot):
                 logging.error(f"Failed to load cog {module}: {e}")
 
     async def send_error_report(self, error_message: str) -> None:
-        if not self.session:
+        if not self.session or self.session.closed:
+            logging.warning("Cannot send error report: session not available")
             return
         try:
             async with self.session.post(WEBHOOK_URL, json={"content": error_message}) as resp:
@@ -186,24 +184,19 @@ class DiscordBot(commands.Bot):
         except Exception as e:
             logging.error(f"Failed to send error report: {e}")
 
-    async def process_commands(self, message):
-        if message.author.bot:
-            return
-        ctx = await self.get_context(message)
-        if not ctx.command:
-            return
-        lock = await self.get_command_lock(ctx.author.id, ctx.command.name)
-        async with lock:
-            await super().process_commands(message)
-
 def setup_signal_handlers(bot: DiscordBot) -> None:
+    def shutdown_handler(*args):
+        if not bot.is_closed:
+            logging.info("Received shutdown signal")
+            asyncio.create_task(bot.close())
+    
     loop = asyncio.get_event_loop()
     if sys.platform != "win32":
-        loop.add_signal_handler(signal.SIGTERM, bot.signal_handler)
-        loop.add_signal_handler(signal.SIGINT, bot.signal_handler)
+        loop.add_signal_handler(signal.SIGTERM, shutdown_handler)
+        loop.add_signal_handler(signal.SIGINT, shutdown_handler)
     else:
-        signal.signal(signal.SIGTERM, lambda *_: bot.signal_handler())
-        signal.signal(signal.SIGINT, lambda *_: bot.signal_handler())
+        signal.signal(signal.SIGTERM, shutdown_handler)
+        signal.signal(signal.SIGINT, shutdown_handler)
 
 async def main():
     try:
@@ -218,10 +211,11 @@ async def main():
     setup_signal_handlers(bot)
 
     try:
-        await bot.start(DISCORD_TOKEN)
-        await bot._shutdown_event.wait()
+        async with bot:
+            await bot.start(DISCORD_TOKEN)
     except Exception as e:
         logging.error(f"Fatal error in main: {e}")
+        await bot.send_error_report(f"Fatal error: {e}")
         sys.exit(1)
 
 if __name__ == "__main__":
