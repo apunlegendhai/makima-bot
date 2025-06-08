@@ -74,6 +74,7 @@ class DiscordBot(commands.Bot):
         self.command_locks: Dict[str, asyncio.Lock] = {}
         self._ready_once = False
         self._synced_commands: List[discord.app_commands.Command] = []
+        self._shutdown_requested = False
 
         # Prefix command
         @self.command()
@@ -88,9 +89,15 @@ class DiscordBot(commands.Bot):
         self.session = aiohttp.ClientSession()
         await self.load_cogs()
 
-        # Sync slash commands exactly once, with simple retry on 429
+        # Small delay to ensure bot is fully ready
+        await asyncio.sleep(1)
+
+        # Sync slash commands with improved retry logic
         backoff = 1
-        while True:
+        max_retries = 3
+        retries = 0
+        
+        while retries < max_retries:
             try:
                 self._synced_commands = await self.tree.sync()
                 logging.info(f"Synced {len(self._synced_commands)} slash commands")
@@ -104,7 +111,10 @@ class DiscordBot(commands.Bot):
                     backoff = min(backoff * 2, 60)
                 else:
                     logging.error(f"Failed to sync slash commands: {e}")
-                    break
+                    retries += 1
+                    if retries >= max_retries:
+                        break
+                    await asyncio.sleep(backoff)
 
     async def on_ready(self):
         if self._ready_once:
@@ -126,6 +136,9 @@ class DiscordBot(commands.Bot):
         print()
 
     async def close(self) -> None:
+        if self.is_closed():
+            return
+            
         logging.info("Shutting down bot...")
         print("\n\033[33m" + "=" * 50 + "\033[0m")
         print("\033[31mBot is shutting down...\033[0m")
@@ -134,16 +147,6 @@ class DiscordBot(commands.Bot):
         if self.session and not self.session.closed:
             await self.session.close()
 
-        for guild in self.guilds:
-            vc = guild.voice_client
-            if vc:
-                try:
-                    await asyncio.wait_for(vc.disconnect(force=True), timeout=10.0)
-                except asyncio.TimeoutError:
-                    logging.warning(f"Timeout while disconnecting VC in guild {guild.id}")
-                except Exception as e:
-                    logging.error(f"Error disconnecting VC in guild {guild.id}: {e}")
-
         await super().close()
 
     async def get_command_lock(self, user_id: int, command_name: str) -> asyncio.Lock:
@@ -151,11 +154,12 @@ class DiscordBot(commands.Bot):
         if key not in self.command_locks:
             self.command_locks[key] = asyncio.Lock()
         
-        # Cleanup old locks periodically
-        if len(self.command_locks) > 1000:
-            active_locks = {k: v for k, v in self.command_locks.items() if v.locked()}
-            self.command_locks.clear()
-            self.command_locks.update(active_locks)
+        # Cleanup old locks periodically with better logic
+        if len(self.command_locks) > 500:
+            # Only remove truly inactive locks
+            inactive_locks = [k for k, v in self.command_locks.items() if not v.locked()]
+            for k in inactive_locks[:len(inactive_locks)//2]:  # Remove half of inactive locks
+                self.command_locks.pop(k, None)
             
         return self.command_locks[key]
 
@@ -164,6 +168,7 @@ class DiscordBot(commands.Bot):
             logging.warning(f"No '{COGS_DIR}' directory found; skipping cog loading.")
             return
 
+        failed_cogs = []
         for filename in os.listdir(COGS_DIR):
             if not filename.endswith('.py') or filename.startswith('__'):
                 continue
@@ -173,9 +178,13 @@ class DiscordBot(commands.Bot):
                 logging.info(f"Loaded cog {module}")
             except Exception as e:
                 logging.error(f"Failed to load cog {module}: {e}")
+                failed_cogs.append(module)
+        
+        if failed_cogs:
+            logging.warning(f"Failed to load {len(failed_cogs)} cogs: {', '.join(failed_cogs)}")
 
     async def send_error_report(self, error_message: str) -> None:
-        if not self.session or self.session.closed:
+        if not self.session or self.session.closed or self.is_closed():
             logging.warning("Cannot send error report: session not available")
             return
         try:
@@ -185,20 +194,33 @@ class DiscordBot(commands.Bot):
             logging.error(f"Failed to send error report: {e}")
 
 def setup_signal_handlers(bot: DiscordBot) -> None:
-    def shutdown_handler(*args):
-        if not bot.is_closed:
-            logging.info("Received shutdown signal")
-            asyncio.create_task(bot.close())
+    def shutdown_handler(signum=None, frame=None):
+        logging.info(f"Received shutdown signal: {signum}")
+        bot._shutdown_requested = True
+        # Use thread-safe method to schedule coroutine
+        if not bot.is_closed():
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    asyncio.create_task(bot.close())
+            except RuntimeError:
+                # Fallback for edge cases
+                pass
     
-    loop = asyncio.get_event_loop()
     if sys.platform != "win32":
-        loop.add_signal_handler(signal.SIGTERM, shutdown_handler)
-        loop.add_signal_handler(signal.SIGINT, shutdown_handler)
+        try:
+            loop = asyncio.get_event_loop()
+            loop.add_signal_handler(signal.SIGTERM, shutdown_handler)
+            loop.add_signal_handler(signal.SIGINT, shutdown_handler)
+        except NotImplementedError:
+            # Fallback to signal.signal for some Unix systems
+            signal.signal(signal.SIGTERM, shutdown_handler)
+            signal.signal(signal.SIGINT, shutdown_handler)
     else:
-        signal.signal(signal.SIGTERM, shutdown_handler)
         signal.signal(signal.SIGINT, shutdown_handler)
 
 async def main():
+    bot = None
     try:
         setup_directories()
         setup_logging()
@@ -207,15 +229,38 @@ async def main():
         print(f"\033[31mStartup error: {e}\033[0m")
         sys.exit(1)
 
-    bot = DiscordBot()
-    setup_signal_handlers(bot)
-
     try:
+        bot = DiscordBot()
+        setup_signal_handlers(bot)
+
         async with bot:
-            await bot.start(DISCORD_TOKEN)
+            # Check for shutdown requests periodically
+            async def shutdown_checker():
+                while not bot.is_closed():
+                    if bot._shutdown_requested:
+                        await bot.close()
+                        break
+                    await asyncio.sleep(1)
+            
+            # Run bot and shutdown checker concurrently
+            await asyncio.gather(
+                bot.start(DISCORD_TOKEN),
+                shutdown_checker(),
+                return_exceptions=True
+            )
+            
+    except KeyboardInterrupt:
+        logging.info("Received keyboard interrupt")
+        if bot and not bot.is_closed():
+            await bot.close()
     except Exception as e:
         logging.error(f"Fatal error in main: {e}")
-        await bot.send_error_report(f"Fatal error: {e}")
+        # Only send error report if bot and session are available
+        if bot and bot.session and not bot.session.closed and not bot.is_closed():
+            try:
+                await bot.send_error_report(f"Fatal error: {e}")
+            except:
+                pass  # Ignore errors when reporting errors during shutdown
         sys.exit(1)
 
 if __name__ == "__main__":
