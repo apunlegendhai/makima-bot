@@ -7,9 +7,10 @@ import asyncio
 import aiohttp
 import sys
 import signal
-from typing import Optional, Dict
+from typing import Optional, Dict, List
 from logging.handlers import TimedRotatingFileHandler
 from pyfiglet import Figlet
+from discord import HTTPException
 
 # Load environment variables
 load_dotenv()
@@ -22,11 +23,9 @@ LOGS_DIR = "logs"
 DATABASE_DIR = "database"
 COGS_DIR = "cogs"
 
-
 def setup_directories() -> None:
     for directory in (LOGS_DIR, DATABASE_DIR, COGS_DIR):
         os.makedirs(directory, exist_ok=True)
-
 
 def setup_logging() -> None:
     class MessageReceivedFilter(logging.Filter):
@@ -46,7 +45,6 @@ def setup_logging() -> None:
     handler.addFilter(MessageReceivedFilter())
     logger.addHandler(handler)
 
-
 def validate_environment() -> None:
     missing = []
     if not DISCORD_TOKEN:
@@ -56,7 +54,6 @@ def validate_environment() -> None:
     if missing:
         raise ValueError(f"Missing required environment variables: {', '.join(missing)}")
 
-
 def print_banner(bot_name: str = "Discord Bot") -> None:
     f = Figlet(font='slant')
     banner = f.renderText(bot_name)
@@ -64,7 +61,6 @@ def print_banner(bot_name: str = "Discord Bot") -> None:
     print("\033[33m" + "=" * 50 + "\033[0m")
     print("\033[32m" + "Bot is starting up..." + "\033[0m")
     print("\033[33m" + "=" * 50 + "\033[0m\n")
-
 
 class DiscordBot(commands.Bot):
     def __init__(self) -> None:
@@ -78,7 +74,9 @@ class DiscordBot(commands.Bot):
         self.command_locks: Dict[str, asyncio.Lock] = {}
         self._shutdown_event = asyncio.Event()
         self._ready_once = False
+        self._synced_commands: List[discord.app_commands.Command] = []
 
+        # Prefix command
         @self.command()
         @commands.cooldown(1, 3, commands.BucketType.user)
         async def ping(ctx):
@@ -87,24 +85,46 @@ class DiscordBot(commands.Bot):
                 await ctx.send(f'<a:sukoon_greendot:1322894177775783997> Latency: {self.latency*1000:.2f}ms')
 
     async def setup_hook(self) -> None:
+        # aiohttp session + cogs
         self.session = aiohttp.ClientSession()
         await self.load_cogs()
 
-    async def on_ready(self):
-        if not self._ready_once:
-            self._ready_once = True
-            print("\033[2J\033[H")
-            print_banner(self.user.name)
-            logging.info(f"Logged in as {self.user.name} ({self.user.id})")
-            print(f"\033[32mLogged in as {self.user.name} ({self.user.id})\033[0m")
-
+        # Sync slash commands exactly once, with simple retry on 429
+        backoff = 1
+        while True:
             try:
-                synced = await self.tree.sync()
-                logging.info(f"Synced {len(synced)} slash commands")
-                for cmd in synced:
+                self._synced_commands = await self.tree.sync()
+                logging.info(f"Synced {len(self._synced_commands)} slash commands")
+                for cmd in self._synced_commands:
                     logging.info(f"- /{cmd.name}: {cmd.description}")
-            except Exception as e:
-                logging.error(f"Failed to sync slash commands: {e}")
+                break
+            except HTTPException as e:
+                if e.status == 429:
+                    logging.warning(f"Rate limited syncing commands; retry in {backoff}s")
+                    await asyncio.sleep(backoff)
+                    backoff = min(backoff * 2, 60)
+                else:
+                    logging.error(f"Failed to sync slash commands: {e}")
+                    break
+
+    async def on_ready(self):
+        if self._ready_once:
+            return
+        self._ready_once = True
+
+        # Clear screen & banner
+        print("\033[2J\033[H")
+        print_banner(self.user.name)
+
+        # Log & print login
+        logging.info(f"Logged in as {self.user.name} ({self.user.id})")
+        print(f"\033[32mLogged in as {self.user.name} ({self.user.id})\033[0m\n")
+
+        # Print the cached sync results
+        print(f"\033[33mSynced {len(self._synced_commands)} slash commands:\033[0m")
+        for cmd in self._synced_commands:
+            print(f"\033[36m- /{cmd.name}\033[0m: {cmd.description}")
+        print()
 
     async def close(self) -> None:
         logging.info("Shutting down bot...")
@@ -176,17 +196,14 @@ class DiscordBot(commands.Bot):
         async with lock:
             await super().process_commands(message)
 
-
 def setup_signal_handlers(bot: DiscordBot) -> None:
     loop = asyncio.get_event_loop()
     if sys.platform != "win32":
         loop.add_signal_handler(signal.SIGTERM, bot.signal_handler)
         loop.add_signal_handler(signal.SIGINT, bot.signal_handler)
     else:
-        # On Windows, fallback to the standard signal module
         signal.signal(signal.SIGTERM, lambda *_: bot.signal_handler())
         signal.signal(signal.SIGINT, lambda *_: bot.signal_handler())
-
 
 async def main():
     try:
@@ -206,7 +223,6 @@ async def main():
     except Exception as e:
         logging.error(f"Fatal error in main: {e}")
         sys.exit(1)
-
 
 if __name__ == "__main__":
     try:
