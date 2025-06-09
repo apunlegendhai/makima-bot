@@ -75,18 +75,14 @@ class DiscordBot(commands.Bot):
         self._ready_once = False
         self._synced_commands: List[discord.app_commands.Command] = []
         self._shutdown_requested = False
-        self._commands_added = False
-        self._processing_commands: set = set()
+        self._processed_messages: set = set()
 
     async def setup_hook(self) -> None:
-        # aiohttp session + cogs
         self.session = aiohttp.ClientSession()
         await self.load_cogs()
-
-        # Small delay to ensure bot is fully ready
         await asyncio.sleep(1)
 
-        # Sync slash commands with improved retry logic
+        # Sync slash commands
         backoff = 1
         max_retries = 3
         retries = 0
@@ -110,65 +106,30 @@ class DiscordBot(commands.Bot):
                         break
                     await asyncio.sleep(backoff)
 
-    def add_prefix_commands(self) -> None:
-        """Add prefix commands - called only once"""
-        @self.command()
-        @commands.cooldown(1, 3, commands.BucketType.user)
-        async def ping(ctx):
-            # Create unique command execution ID
-            cmd_id = f"{ctx.message.id}:{ctx.command.name}:{ctx.author.id}"
-            
-            # Check if already processing this exact command
-            if cmd_id in self._processing_commands:
-                return
-            
-            # Mark as processing
-            self._processing_commands.add(cmd_id)
-            
-            try:
-                lock = await self.get_command_lock(ctx.author.id, ctx.command.name)
-                async with lock:
-                    await ctx.send(f'<a:sukoon_greendot:1322894177775783997> Latency: {self.latency*1000:.2f}ms')
-            finally:
-                # Always remove from processing set
-                self._processing_commands.discard(cmd_id)
-
-    async def on_command(self, ctx):
+    async def process_commands(self, message):
         """Override to prevent duplicate command processing"""
-        # Create unique command execution ID
-        cmd_id = f"{ctx.message.id}:{ctx.command.name}:{ctx.author.id}"
-        
-        # Skip if already processing this exact command
-        if cmd_id in self._processing_commands:
+        if message.author.bot:
             return
+            
+        # Prevent duplicate processing of the same message
+        if message.id in self._processed_messages:
+            return
+            
+        self._processed_messages.add(message.id)
         
-        # Mark as processing
-        self._processing_commands.add(cmd_id)
+        # Clean up old message IDs periodically
+        if len(self._processed_messages) > 1000:
+            # Keep only recent 500 entries
+            recent_messages = list(self._processed_messages)[-500:]
+            self._processed_messages = set(recent_messages)
         
-        # Clean up old entries periodically
-        if len(self._processing_commands) > 1000:
-            # Keep only recent entries (last 500)
-            recent_entries = list(self._processing_commands)[-500:]
-            self._processing_commands = set(recent_entries)
+        # Process the command normally
+        await super().process_commands(message)
 
-    async def on_command_completion(self, ctx):
-        """Clean up after command completion"""
-        cmd_id = f"{ctx.message.id}:{ctx.command.name}:{ctx.author.id}"
-        self._processing_commands.discard(cmd_id)
-
-    async def on_command_error(self, ctx, error):
-        """Clean up after command error"""
-        cmd_id = f"{ctx.message.id}:{ctx.command.name}:{ctx.author.id}"
-        self._processing_commands.discard(cmd_id)
-        # Handle the error as needed
+    async def on_ready(self):
         if self._ready_once:
             return
         self._ready_once = True
-
-        # Add prefix commands only once
-        if not self._commands_added:
-            self.add_prefix_commands()
-            self._commands_added = True
 
         # Clear screen & banner
         print("\033[2J\033[H")
@@ -203,11 +164,10 @@ class DiscordBot(commands.Bot):
         if key not in self.command_locks:
             self.command_locks[key] = asyncio.Lock()
         
-        # Cleanup old locks periodically with better logic
+        # Cleanup old locks periodically
         if len(self.command_locks) > 500:
-            # Only remove truly inactive locks
             inactive_locks = [k for k, v in self.command_locks.items() if not v.locked()]
-            for k in inactive_locks[:len(inactive_locks)//2]:  # Remove half of inactive locks
+            for k in inactive_locks[:len(inactive_locks)//2]:
                 self.command_locks.pop(k, None)
             
         return self.command_locks[key]
@@ -242,18 +202,25 @@ class DiscordBot(commands.Bot):
         except Exception as e:
             logging.error(f"Failed to send error report: {e}")
 
+# Add the ping command here as a standalone command
+@commands.command()
+@commands.cooldown(1, 3, commands.BucketType.user)
+async def ping(ctx):
+    bot = ctx.bot
+    lock = await bot.get_command_lock(ctx.author.id, ctx.command.name)
+    async with lock:
+        await ctx.send(f'<a:sukoon_greendot:1322894177775783997> Latency: {bot.latency*1000:.2f}ms')
+
 def setup_signal_handlers(bot: DiscordBot) -> None:
     def shutdown_handler(signum=None, frame=None):
         logging.info(f"Received shutdown signal: {signum}")
         bot._shutdown_requested = True
-        # Use thread-safe method to schedule coroutine
         if not bot.is_closed():
             try:
                 loop = asyncio.get_event_loop()
                 if loop.is_running():
                     asyncio.create_task(bot.close())
             except RuntimeError:
-                # Fallback for edge cases
                 pass
     
     if sys.platform != "win32":
@@ -262,7 +229,6 @@ def setup_signal_handlers(bot: DiscordBot) -> None:
             loop.add_signal_handler(signal.SIGTERM, shutdown_handler)
             loop.add_signal_handler(signal.SIGINT, shutdown_handler)
         except NotImplementedError:
-            # Fallback to signal.signal for some Unix systems
             signal.signal(signal.SIGTERM, shutdown_handler)
             signal.signal(signal.SIGINT, shutdown_handler)
     else:
@@ -280,10 +246,13 @@ async def main():
 
     try:
         bot = DiscordBot()
+        
+        # Add the ping command to the bot
+        bot.add_command(ping)
+        
         setup_signal_handlers(bot)
 
         async with bot:
-            # Check for shutdown requests periodically
             async def shutdown_checker():
                 while not bot.is_closed():
                     if bot._shutdown_requested:
@@ -291,7 +260,6 @@ async def main():
                         break
                     await asyncio.sleep(1)
             
-            # Run bot and shutdown checker concurrently
             await asyncio.gather(
                 bot.start(DISCORD_TOKEN),
                 shutdown_checker(),
@@ -304,12 +272,11 @@ async def main():
             await bot.close()
     except Exception as e:
         logging.error(f"Fatal error in main: {e}")
-        # Only send error report if bot and session are available
         if bot and bot.session and not bot.session.closed and not bot.is_closed():
             try:
                 await bot.send_error_report(f"Fatal error: {e}")
             except:
-                pass  # Ignore errors when reporting errors during shutdown
+                pass
         sys.exit(1)
 
 if __name__ == "__main__":
