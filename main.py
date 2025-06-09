@@ -75,14 +75,8 @@ class DiscordBot(commands.Bot):
         self._ready_once = False
         self._synced_commands: List[discord.app_commands.Command] = []
         self._shutdown_requested = False
-
-        # Prefix command
-        @self.command()
-        @commands.cooldown(1, 3, commands.BucketType.user)
-        async def ping(ctx):
-            lock = await self.get_command_lock(ctx.author.id, ctx.command.name)
-            async with lock:
-                await ctx.send(f'<a:sukoon_greendot:1322894177775783997> Latency: {self.latency*1000:.2f}ms')
+        self._commands_added = False
+        self._processing_commands: set = set()
 
     async def setup_hook(self) -> None:
         # aiohttp session + cogs
@@ -116,10 +110,65 @@ class DiscordBot(commands.Bot):
                         break
                     await asyncio.sleep(backoff)
 
-    async def on_ready(self):
+    def add_prefix_commands(self) -> None:
+        """Add prefix commands - called only once"""
+        @self.command()
+        @commands.cooldown(1, 3, commands.BucketType.user)
+        async def ping(ctx):
+            # Create unique command execution ID
+            cmd_id = f"{ctx.message.id}:{ctx.command.name}:{ctx.author.id}"
+            
+            # Check if already processing this exact command
+            if cmd_id in self._processing_commands:
+                return
+            
+            # Mark as processing
+            self._processing_commands.add(cmd_id)
+            
+            try:
+                lock = await self.get_command_lock(ctx.author.id, ctx.command.name)
+                async with lock:
+                    await ctx.send(f'<a:sukoon_greendot:1322894177775783997> Latency: {self.latency*1000:.2f}ms')
+            finally:
+                # Always remove from processing set
+                self._processing_commands.discard(cmd_id)
+
+    async def on_command(self, ctx):
+        """Override to prevent duplicate command processing"""
+        # Create unique command execution ID
+        cmd_id = f"{ctx.message.id}:{ctx.command.name}:{ctx.author.id}"
+        
+        # Skip if already processing this exact command
+        if cmd_id in self._processing_commands:
+            return
+        
+        # Mark as processing
+        self._processing_commands.add(cmd_id)
+        
+        # Clean up old entries periodically
+        if len(self._processing_commands) > 1000:
+            # Keep only recent entries (last 500)
+            recent_entries = list(self._processing_commands)[-500:]
+            self._processing_commands = set(recent_entries)
+
+    async def on_command_completion(self, ctx):
+        """Clean up after command completion"""
+        cmd_id = f"{ctx.message.id}:{ctx.command.name}:{ctx.author.id}"
+        self._processing_commands.discard(cmd_id)
+
+    async def on_command_error(self, ctx, error):
+        """Clean up after command error"""
+        cmd_id = f"{ctx.message.id}:{ctx.command.name}:{ctx.author.id}"
+        self._processing_commands.discard(cmd_id)
+        # Handle the error as needed
         if self._ready_once:
             return
         self._ready_once = True
+
+        # Add prefix commands only once
+        if not self._commands_added:
+            self.add_prefix_commands()
+            self._commands_added = True
 
         # Clear screen & banner
         print("\033[2J\033[H")
