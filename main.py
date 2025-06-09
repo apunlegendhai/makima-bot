@@ -7,7 +7,10 @@ import asyncio
 import aiohttp
 import sys
 import signal
-from typing import Optional, Dict, List
+import subprocess
+import ast
+import re
+from typing import Optional, Dict, List, Set
 from logging.handlers import TimedRotatingFileHandler
 from pyfiglet import Figlet
 from discord import HTTPException
@@ -26,6 +29,196 @@ COGS_DIR = "cogs"
 def setup_directories() -> None:
     for directory in (LOGS_DIR, DATABASE_DIR, COGS_DIR):
         os.makedirs(directory, exist_ok=True)
+
+def analyze_codebase() -> Set[str]:
+    """Analyze all Python files to extract required packages"""
+    packages = set()
+    
+    # Standard library modules to ignore
+    stdlib_modules = {
+        'os', 'sys', 'asyncio', 'logging', 'json', 'datetime', 'time', 'random',
+        'typing', 'collections', 'itertools', 'functools', 'pathlib', 'urllib',
+        'http', 'socket', 'ssl', 'hashlib', 'base64', 'uuid', 'pickle', 're',
+        'math', 'statistics', 'decimal', 'fractions', 'sqlite3', 'csv', 'xml',
+        'html', 'email', 'signal', 'threading', 'multiprocessing', 'subprocess',
+        'ast', 'importlib', 'pkgutil', 'warnings', 'traceback', 'io', 'tempfile'
+    }
+    
+    def extract_imports_from_file(filepath: str) -> Set[str]:
+        """Extract import statements from a Python file"""
+        file_packages = set()
+        try:
+            with open(filepath, 'r', encoding='utf-8') as f:
+                content = f.read()
+            
+            # Parse AST to find imports
+            try:
+                tree = ast.parse(content)
+                for node in ast.walk(tree):
+                    if isinstance(node, ast.Import):
+                        for alias in node.names:
+                            pkg = alias.name.split('.')[0]
+                            if pkg not in stdlib_modules:
+                                file_packages.add(pkg)
+                    elif isinstance(node, ast.ImportFrom):
+                        if node.module:
+                            pkg = node.module.split('.')[0]
+                            if pkg not in stdlib_modules:
+                                file_packages.add(pkg)
+            except SyntaxError:
+                # Fallback to regex if AST parsing fails
+                import_patterns = [
+                    r'^\s*import\s+([a-zA-Z_][a-zA-Z0-9_]*)',
+                    r'^\s*from\s+([a-zA-Z_][a-zA-Z0-9_]*)\s+import'
+                ]
+                for pattern in import_patterns:
+                    matches = re.findall(pattern, content, re.MULTILINE)
+                    for match in matches:
+                        if match not in stdlib_modules:
+                            file_packages.add(match)
+        except Exception as e:
+            logging.warning(f"Could not analyze {filepath}: {e}")
+        
+        return file_packages
+    
+    # Analyze main file
+    if os.path.exists(__file__):
+        packages.update(extract_imports_from_file(__file__))
+    
+    # Analyze cogs directory
+    if os.path.exists(COGS_DIR):
+        for root, dirs, files in os.walk(COGS_DIR):
+            for file in files:
+                if file.endswith('.py') and not file.startswith('__'):
+                    filepath = os.path.join(root, file)
+                    packages.update(extract_imports_from_file(filepath))
+    
+    # Known package mappings for common discord bot packages
+    package_mappings = {
+        'discord': 'discord.py',
+        'asyncpg': 'asyncpg',
+        'aiosqlite': 'aiosqlite',
+        'motor': 'motor',
+        'pymongo': 'pymongo',
+        'wavelink': 'wavelink',
+        'youtube_dl': 'youtube-dl',
+        'yt_dlp': 'yt-dlp',
+        'PIL': 'Pillow',
+        'cv2': 'opencv-python',
+        'numpy': 'numpy',
+        'pandas': 'pandas',
+        'matplotlib': 'matplotlib',
+        'seaborn': 'seaborn',
+        'requests': 'requests',
+        'beautifulsoup4': 'beautifulsoup4',
+        'lxml': 'lxml',
+        'psutil': 'psutil',
+        'colorama': 'colorama',
+        'tabulate': 'tabulate',
+        'humanfriendly': 'humanfriendly'
+    }
+    
+    # Map package names to pip install names
+    pip_packages = set()
+    for pkg in packages:
+        pip_packages.add(package_mappings.get(pkg, pkg))
+    
+    return pip_packages
+
+def create_requirements_file(packages: Set[str]) -> None:
+    """Create requirements.txt with detected packages"""
+    # Base requirements that are always needed
+    base_requirements = [
+        'discord.py>=2.3.0',
+        'python-dotenv>=0.19.0',
+        'aiohttp>=3.8.0',
+        'pyfiglet>=0.8.0'
+    ]
+    
+    # Combine with detected packages
+    all_packages = set(base_requirements)
+    for pkg in packages:
+        if not any(pkg in req for req in base_requirements):
+            all_packages.add(pkg)
+    
+    requirements_content = '\n'.join(sorted(all_packages))
+    
+    with open('requirements.txt', 'w', encoding='utf-8') as f:
+        f.write(requirements_content)
+    
+    print(f"\033[32m✓ Created requirements.txt with {len(all_packages)} packages\033[0m")
+    logging.info(f"Created requirements.txt with packages: {', '.join(sorted(all_packages))}")
+
+def install_dependencies() -> bool:
+    """Install packages from requirements.txt"""
+    try:
+        print("\033[33mInstalling dependencies...\033[0m")
+        
+        # Check if pip is available
+        subprocess.run([sys.executable, '-m', 'pip', '--version'], 
+                      check=True, capture_output=True)
+        
+        # Install requirements
+        result = subprocess.run(
+            [sys.executable, '-m', 'pip', 'install', '-r', 'requirements.txt'],
+            capture_output=True, text=True, timeout=300
+        )
+        
+        if result.returncode == 0:
+            print("\033[32m✓ Dependencies installed successfully\033[0m")
+            logging.info("Dependencies installed successfully")
+            return True
+        else:
+            print(f"\033[31m✗ Failed to install dependencies:\033[0m")
+            print(result.stderr)
+            logging.error(f"Failed to install dependencies: {result.stderr}")
+            return False
+            
+    except subprocess.TimeoutExpired:
+        print("\033[31m✗ Installation timed out\033[0m")
+        logging.error("Package installation timed out")
+        return False
+    except Exception as e:
+        print(f"\033[31m✗ Error installing dependencies: {e}\033[0m")
+        logging.error(f"Error installing dependencies: {e}")
+        return False
+
+def setup_environment() -> bool:
+    """Setup environment with dependency analysis and installation"""
+    print("\033[36m" + "=" * 50 + "\033[0m")
+    print("\033[33mAnalyzing codebase and setting up environment...\033[0m")
+    print("\033[36m" + "=" * 50 + "\033[0m")
+    
+    try:
+        # Analyze codebase for dependencies
+        print("\033[33mScanning codebase for dependencies...\033[0m")
+        detected_packages = analyze_codebase()
+        
+        if detected_packages:
+            print(f"\033[32m✓ Detected {len(detected_packages)} packages: {', '.join(sorted(detected_packages))}\033[0m")
+        
+        # Create requirements.txt
+        create_requirements_file(detected_packages)
+        
+        # Ask user if they want to install dependencies
+        try:
+            install_choice = input("\033[33mInstall dependencies now? (y/N): \033[0m").strip().lower()
+            if install_choice in ['y', 'yes']:
+                success = install_dependencies()
+                if not success:
+                    print("\033[33mYou can manually install dependencies later with: pip install -r requirements.txt\033[0m")
+                return success
+            else:
+                print("\033[33mSkipping installation. Run 'pip install -r requirements.txt' when ready.\033[0m")
+                return True
+        except (KeyboardInterrupt, EOFError):
+            print("\033[33m\nSkipping installation. Run 'pip install -r requirements.txt' when ready.\033[0m")
+            return True
+            
+    except Exception as e:
+        print(f"\033[31m✗ Error during environment setup: {e}\033[0m")
+        logging.error(f"Error during environment setup: {e}")
+        return False
 
 def setup_logging() -> None:
     class MessageReceivedFilter(logging.Filter):
@@ -239,6 +432,11 @@ async def main():
     try:
         setup_directories()
         setup_logging()
+        
+        # Setup environment with dependency analysis
+        if not setup_environment():
+            print("\033[33mContinuing with existing environment...\033[0m")
+        
         validate_environment()
     except ValueError as e:
         print(f"\033[31mStartup error: {e}\033[0m")
