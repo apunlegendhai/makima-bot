@@ -36,6 +36,14 @@ _si_cache = {}
 # Guild timezones: { guild_id: "Region/City" }
 _guild_timezones = {}
 
+# ─── Utility Functions ─────────────────────────────────────────────────────────
+
+def truncate_field(text, max_length=1020):
+    """Truncate text to fit Discord field limits with ellipsis."""
+    if len(text) <= max_length:
+        return text
+    return text[:max_length-3] + "..."
+
 # ─── ServerInfo Cog ────────────────────────────────────────────────────────────
 
 class ServerInfo(commands.Cog):
@@ -71,7 +79,7 @@ class ServerInfo(commands.Cog):
             return await ctx.send(embed=cached['embed'])
 
         # Determine timezone
-        tz_name = _guild_timezones.get(guild.id, 'Asia/Kolkata')
+        tz_name = _guild_timezones.get(guild.id, 'UTC')
         zone = ZoneInfo(tz_name)
 
         # Format helper
@@ -80,20 +88,27 @@ class ServerInfo(commands.Cog):
             local = dt.astimezone(zone).strftime('%d %b %Y • %I:%M %p')
             return f"<t:{ts}:{style}>\n({local})"
 
-        # Build sections
+        # Build sections with length management
         about = (
-            f"Name: {guild.name}\n"
-            f"ID: {guild.id}\n"
-            f"Owner <:Owner_Crow:1375731826093461544> : {guild.owner.mention if guild.owner else 'Unknown'}\n"
-            f"Created At: {fmt_time(guild.created_at)}\n"
-            f"Members: {guild.member_count}\n"
-            f"Verification Level: {str(guild.verification_level).title()}\n"
-            f"Explicit Content Filter: {str(guild.explicit_content_filter).title()}\n"
-            f"Boost Level:[<a:server_boostin:1375731855008989224> {guild.premium_tier} ({guild.premium_subscription_count} boosts)]\n"
-            f"Vanity URL: {guild.vanity_url_code if guild.vanity_url_code else 'None'}\n"
-            f"Features: {', '.join(f'`{feature.replace('_', ' ').title()}`' for feature in guild.features) if guild.features else 'None'}"
+            f"**Name:** {guild.name}\n"
+            f"**ID:** {guild.id}\n"
+            f"**Owner** <:Owner_Crow:1375731826093461544>: {guild.owner.mention if guild.owner else 'Unknown'}\n"
+            f"**Members:** {guild.member_count}\n"
+            f"**Verification:** {str(guild.verification_level).title()}\n"
+            f"**Boost Level:** <a:server_boostin:1375731855008989224> {guild.premium_tier} ({guild.premium_subscription_count} boosts)\n"
+            f"**Vanity URL:** {guild.vanity_url_code if guild.vanity_url_code else 'None'}"
         )
+        
+        created_info = fmt_time(guild.created_at)
+        
+        # Features (truncated if too long)
+        features_text = ', '.join(f'`{feature.replace("_", " ").title()}`' for feature in guild.features) if guild.features else 'None'
+        if len(features_text) > 200:  # Keep features reasonable
+            features_text = features_text[:200] + "..."
+
         description = guild.description or "None"
+        if len(description) > 1020:
+            description = description[:1017] + "..."
 
         # Build embed
         embed = discord.Embed(
@@ -104,70 +119,82 @@ class ServerInfo(commands.Cog):
         if guild.icon:
             embed.set_thumbnail(url=guild.icon.url)
 
-        embed.add_field(name="__ABOUT__", value=about, inline=False)
+        # Add fields with truncation
+        embed.add_field(name="__ABOUT__", value=truncate_field(about), inline=False)
+        embed.add_field(name="__CREATED__", value=created_info, inline=False)
         embed.add_field(name="__DESCRIPTION__", value=description, inline=False)
+        embed.add_field(name="__FEATURES__", value=features_text, inline=False)
 
         # Add channel counts
         channels = (
-            f"Categories: {len(guild.categories)}\n"
-            f"Text Channels: {len(guild.text_channels)}\n"
-            f"Voice Channels: {len(guild.voice_channels)}\n"
-            f"Forums: {len(guild.forums)}\n"
-            f"Total: {len(guild.channels)}\n"
-            f"System Channel: {guild.system_channel.mention if guild.system_channel else 'None'}\n"
-            f"Rules Channel: {guild.rules_channel.mention if guild.rules_channel else 'None'}\n"
-            f"Public Updates Channel: {guild.public_updates_channel.mention if guild.public_updates_channel else 'None'}"
+            f"**Categories:** {len(guild.categories)}\n"
+            f"**Text:** {len(guild.text_channels)}\n"
+            f"**Voice:** {len(guild.voice_channels)}\n"
+            f"**Forums:** {len(guild.forums)}\n"
+            f"**Total:** {len(guild.channels)}\n"
+            f"**System:** {guild.system_channel.mention if guild.system_channel else 'None'}\n"
+            f"**Rules:** {guild.rules_channel.mention if guild.rules_channel else 'None'}"
         )
-        embed.add_field(name="__CHANNELS__", value=channels, inline=False)
+        embed.add_field(name="__CHANNELS__", value=truncate_field(channels), inline=True)
 
         # Add role counts
         roles = (
-            f"Total Roles: {len(guild.roles)}\n"
-            f"Managed Roles: {len([r for r in guild.roles if r.managed])}\n"
-            f"Highest Role: {guild.roles[-1].mention if guild.roles else 'None'}\n"
-            f"Role Color: {guild.roles[-1].color if guild.roles else 'None'}\n"
-            f"Role Position: {guild.roles[-1].position if guild.roles else 'None'}"
+            f"**Total:** {len(guild.roles)}\n"
+            f"**Managed:** {len([r for r in guild.roles if r.managed])}\n"
+            f"**Highest:** {guild.roles[-1].mention if len(guild.roles) > 1 else 'None'}\n"
+            f"**Color:** {str(guild.roles[-1].color) if len(guild.roles) > 1 else 'None'}"
         )
-        embed.add_field(name="__ROLES__", value=roles, inline=False)
+        embed.add_field(name="__ROLES__", value=roles, inline=True)
 
-        # Add emoji counts
+        # Add emoji counts (fixed animated count)
+        animated_count = len([e for e in guild.emojis if e.animated])
+        regular_count = len(guild.emojis) - animated_count
         emojis = (
-            f"Regular: {len(guild.emojis)}\n"
-            f"Animated: {len(guild.emojis) - len([e for e in guild.emojis if not e.animated])}\n"
-            f"Total: {len(guild.emojis)}\n"
-            f"Emoji Limit: {guild.emoji_limit}\n"
-            f"Sticker Limit: {guild.sticker_limit}"
+            f"**Regular:** {regular_count}\n"
+            f"**Animated:** {animated_count}\n"
+            f"**Total:** {len(guild.emojis)}\n"
+            f"**Limit:** {guild.emoji_limit}\n"
+            f"**Stickers:** {guild.sticker_limit}"
         )
-        embed.add_field(name="__EMOJIS__", value=emojis, inline=False)
+        embed.add_field(name="__EMOJIS__", value=emojis, inline=True)
 
-        # Add member stats
-        online_members = len([m for m in guild.members if m.status != discord.Status.offline])
+        # Add member stats (fixed status counting)
+        online_members = len([m for m in guild.members if m.status == discord.Status.online])
         idle_members = len([m for m in guild.members if m.status == discord.Status.idle])
         dnd_members = len([m for m in guild.members if m.status == discord.Status.dnd])
+        offline_members = len([m for m in guild.members if m.status == discord.Status.offline])
         bot_count = len([m for m in guild.members if m.bot])
         human_count = guild.member_count - bot_count
 
         members = (
-            f"Total: {guild.member_count}\n"
-            f"Humans: {human_count}\n"
-            f"Bots: {bot_count}\n"
-            f"Online: {online_members}\n"
-            f"Idle: {idle_members}\n"
-            f"Do Not Disturb: {dnd_members}\n"
-            f"Offline: {guild.member_count - online_members - idle_members - dnd_members}"
+            f"**Total:** {guild.member_count:,}\n"
+            f"**Humans:** {human_count:,}\n"
+            f"**Bots:** {bot_count:,}\n"
+            f"**Online:** {online_members:,}\n"
+            f"**Idle:** {idle_members:,}\n"
+            f"**DND:** {dnd_members:,}\n"
+            f"**Offline:** {offline_members:,}"
         )
-        embed.add_field(name="__MEMBERS__", value=members, inline=False)
+        embed.add_field(name="__MEMBERS__", value=members, inline=True)
 
         # Add server limits
         limits = (
-            f"File Upload Limit: {guild.filesize_limit/1024/1024:.1f}MB\n"
-            f"Bitrate Limit: {guild.bitrate_limit/1000:.0f}kbps\n"
-            f"Emoji Limit: {guild.emoji_limit}\n"
-            f"Sticker Limit: {guild.sticker_limit}"
+            f"**Upload:** {guild.filesize_limit/1024/1024:.1f}MB\n"
+            f"**Bitrate:** {guild.bitrate_limit/1000:.0f}kbps\n"
+            f"**Emoji Limit:** {guild.emoji_limit}\n"
+            f"**Sticker Limit:** {guild.sticker_limit}"
         )
-        embed.add_field(name="__SERVER LIMITS__", value=limits, inline=False)
+        embed.add_field(name="__LIMITS__", value=limits, inline=True)
 
-        embed.set_footer(text=f"Requested by {ctx.author.display_name} • Server ID: {guild.id}")
+        # Content filter info
+        security = (
+            f"**Verification:** {str(guild.verification_level).title()}\n"
+            f"**Content Filter:** {str(guild.explicit_content_filter).title()}\n"
+            f"**2FA Required:** {'Yes' if guild.mfa_level else 'No'}"
+        )
+        embed.add_field(name="__SECURITY__", value=security, inline=True)
+
+        embed.set_footer(text=f"Requested by {ctx.author.display_name} • ID: {guild.id}")
 
         # Add server banner if it exists
         if guild.banner:
@@ -184,24 +211,34 @@ class ServerInfo(commands.Cog):
         if role is None:
             return await ctx.send("Please specify a role: `.roleinfo @RoleName`")
 
-        # (reuse your existing roleinfo code here—timestamps can also use fmt_time())
-
-        # Example for creation date with localization:
         tz_name = _guild_timezones.get(ctx.guild.id, 'UTC')
         zone = ZoneInfo(tz_name)
-        created_local = role.created_at.astimezone(zone).strftime('%Y-%m-%d %H:%M:%S')
-        created_field = (
-            f"<t:{int(role.created_at.timestamp())}:F> "
-            f"({created_local} {tz_name})"
-        )
+        
+        # Format creation time
+        created_ts = int(role.created_at.timestamp())
+        created_local = role.created_at.astimezone(zone).strftime('%d %b %Y • %I:%M %p')
+        created_field = f"<t:{created_ts}:F>\n({created_local})"
+
+        # Role permissions (truncated if too long)
+        perms = [perm.replace('_', ' ').title() for perm, value in role.permissions if value]
+        perms_text = ', '.join(perms) if perms else 'None'
+        if len(perms_text) > 1000:
+            perms_text = perms_text[:997] + "..."
 
         embed = discord.Embed(
             title=f"Role Information: {role.name}",
-            color=get_next_color(),
+            color=role.color if role.color.value else get_next_color(),
             timestamp=datetime.now(tz=zone)
         )
-        embed.add_field(name="Created At", value=created_field, inline=False)
-        # … rest of your fields …
+        
+        embed.add_field(name="**ID**", value=str(role.id), inline=True)
+        embed.add_field(name="**Members**", value=str(len(role.members)), inline=True)
+        embed.add_field(name="**Position**", value=str(role.position), inline=True)
+        embed.add_field(name="**Color**", value=str(role.color), inline=True)
+        embed.add_field(name="**Mentionable**", value="Yes" if role.mentionable else "No", inline=True)
+        embed.add_field(name="**Hoisted**", value="Yes" if role.hoist else "No", inline=True)
+        embed.add_field(name="**Created**", value=created_field, inline=False)
+        embed.add_field(name="**Permissions**", value=perms_text, inline=False)
 
         embed.set_footer(text=f"Requested by {ctx.author.display_name}")
         await ctx.send(embed=embed)
@@ -215,7 +252,7 @@ class ServerInfo(commands.Cog):
         zone = ZoneInfo(tz_name)
         embed = discord.Embed(
             title="Member Count",
-            description=f"{total:,}",
+            description=f"**{total:,}** members",
             color=get_next_color(),
             timestamp=datetime.now(tz=zone)
         )
