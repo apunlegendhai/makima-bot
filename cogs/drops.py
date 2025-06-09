@@ -12,6 +12,53 @@ from discord.ext import commands
 from discord import app_commands, ui
 from datetime import datetime, timezone, timedelta
 from collections import deque, Counter
+import pytz
+
+# ─── UTILITY FUNCTIONS ─────────────────────────────────────────────────────────
+def get_ist_time(dt: datetime = None) -> datetime:
+    """Convert UTC datetime to Indian Standard Time"""
+    if dt is None:
+        dt = discord.utils.utcnow()
+    ist = pytz.timezone('Asia/Kolkata')
+    return dt.replace(tzinfo=pytz.UTC).astimezone(ist)
+
+def format_time_ago(dt: datetime) -> str:
+    """Format datetime as user-friendly relative time in IST"""
+    ist_dt = get_ist_time(dt)
+    now_ist = get_ist_time()
+    diff = now_ist - ist_dt
+    
+    if diff.days > 0:
+        if diff.days == 1:
+            return f"ended yesterday at {ist_dt.strftime('%I:%M %p')}"
+        elif diff.days <= 7:
+            return f"ended {diff.days} days ago at {ist_dt.strftime('%I:%M %p')}"
+        else:
+            return f"ended on {ist_dt.strftime('%B %d at %I:%M %p')}"
+    
+    hours = diff.seconds // 3600
+    minutes = (diff.seconds % 3600) // 60
+    
+    if hours > 0:
+        return f"ended {hours} hour{'s' if hours != 1 else ''} ago at {ist_dt.strftime('%I:%M %p')}"
+    elif minutes > 0:
+        return f"ended {minutes} minute{'s' if minutes != 1 else ''} ago at {ist_dt.strftime('%I:%M %p')}"
+    else:
+        return f"ended at {ist_dt.strftime('%I:%M %p')}"
+
+def format_timestamp(dt: datetime = None) -> str:
+    """Format datetime as user-friendly timestamp in IST"""
+    ist_dt = get_ist_time(dt)
+    now_ist = get_ist_time()
+    
+    if ist_dt.date() == now_ist.date():
+        return f"today at {ist_dt.strftime('%I:%M %p')}"
+    elif ist_dt.date() == (now_ist - timedelta(days=1)).date():
+        return f"yesterday at {ist_dt.strftime('%I:%M %p')}"
+    elif (now_ist - ist_dt).days <= 7:
+        return f"{ist_dt.strftime('%A at %I:%M %p')}"
+    else:
+        return f"{ist_dt.strftime('%B %d at %I:%M %p')}"
 
 # ─── SETUP FILES & DB ───────────────────────────────────────────────────────────
 DB_FOLDER = 'database'
@@ -186,9 +233,9 @@ class DropSystem(commands.Cog):
     @app_commands.command(name='reset_cooldown', description='Reset cooldown for a user or entire server (Admin only)')
     @app_commands.describe(
         user='User to reset cooldown for (leave empty to reset entire server)',
-        confirm='Type "confirm" to reset entire server'
+        reset_server='Reset entire server cooldown'
     )
-    async def reset_cooldown(self, interaction: discord.Interaction, user: discord.Member = None, confirm: str = None):
+    async def reset_cooldown(self, interaction: discord.Interaction, user: discord.Member = None, reset_server: bool = False):
         if not interaction.user.guild_permissions.administrator:
             return await interaction.response.send_message("Admin only.", ephemeral=True)
 
@@ -202,11 +249,8 @@ class DropSystem(commands.Cog):
                 await db.execute("DELETE FROM cooldowns WHERE user_id=?", (user.id,))
                 await db.commit()
                 await interaction.followup.send(f"✅ Cooldown reset for {user.mention}", ephemeral=True)
-            else:
+            elif reset_server:
                 # Reset entire server
-                if confirm != "confirm":
-                    return await interaction.followup.send("To reset entire server cooldowns, use: `/reset_cooldown confirm:confirm`", ephemeral=True)
-
                 # Get all users in this guild from cooldowns
                 async with db.execute("""
                     SELECT DISTINCT user_id FROM cooldowns 
@@ -226,6 +270,8 @@ class DropSystem(commands.Cog):
                     await interaction.followup.send(f"✅ Reset cooldowns for {len(user_ids)} users in this server", ephemeral=True)
                 else:
                     await interaction.followup.send("No cooldowns found for this server", ephemeral=True)
+            else:
+                await interaction.followup.send("Please specify a user or enable 'reset_server' to reset all cooldowns.", ephemeral=True)
 
         except Exception as e:
             logger.exception(f"Error resetting cooldown: {e}")
@@ -240,7 +286,7 @@ class DropSystem(commands.Cog):
         try:
             embed = discord.Embed(
                 color=0x2f3136,
-                description=f"<:sukoon_blackdot:1322894649488314378> Hosted by: {interaction.user.mention}\n {winner_count} <:sukoon_blackdot:1322894649488314378> lucky winners needed!\n<:sukoon_blackdot:1322894649488314378> Click or cry! 😭"
+                description=f"<:sukoon_blackdot:1322894649488314378> Hosted by: {interaction.user.mention}\n<:sukoon_blackdot:1322894649488314378> winners: {winner_count}\n<:sukoon_blackdot:1322894649488314378> First Come First Serve! ⚡"
             )
 
             embed.set_author(
@@ -248,7 +294,7 @@ class DropSystem(commands.Cog):
                 icon_url=interaction.guild.icon.url if interaction.guild.icon else None
             )
 
-            embed.set_footer(text=footer_text or f"{discord.utils.utcnow().strftime('%H:%M')} • Powered by {self.bot.user.name}")
+            embed.set_footer(text=footer_text or f"Powered by {self.bot.user.name} • {format_timestamp(now)}")
 
             view = DropButton(drop_id=drop_id, emoji=custom_emoji)
             msg = await interaction.followup.send(
@@ -405,15 +451,14 @@ class DropSystem(commands.Cog):
                 remaining_winners = drop[6] - len(winners)  # winner_count - current winners
                 embed = discord.Embed(
                     color=0x2f3136,
-                    description=f"<:sukoon_blackdot:1322894649488314378> Hosted by: <@{drop[4]}>\n<:sukoon_blackdot:1322894649488314378> lucky winners needed!: {remaining_winners}\n<:sukoon_blackdot:1322894649488314378> Click or cry! 😭"  # host_id
+                    description=f"<:sukoon_blackdot:1322894649488314378> Hosted by: <@{drop[4]}>\n<:sukoon_blackdot:1322894649488314378> lucky winners needed!: {remaining_winners}\n<:sukoon_blackdot:1322894649488314378> First Come First Serve! ⚡"  # host_id
                 )
 
             embed.set_author(
                 name=drop[5],  # prize_name
                 icon_url=chan.guild.icon.url if chan.guild.icon else None
             )
-            embed.set_footer(text=drop[9] or f"at {discord.utils.utcnow().strftime('%H:%M')} • Powered by {chan.guild.me.display_name}")
-
+            embed.set_footer(text=drop[9] or f"Powered by {chan.guild.me.display_name} • {format_timestamp(discord.utils.utcnow())}")
             # Add winners field with mentions
             if winners:
                 mentions = " ".join(f"<@{uid}>" for uid in winners)
@@ -430,7 +475,6 @@ class DropSystem(commands.Cog):
                 view.add_item(ui.Button(
                     label='Claimed',
                     style=discord.ButtonStyle.grey,
-                    emoji='✅',
                     disabled=True
                 ))
                 # Send completion message as reply to drop
@@ -439,15 +483,18 @@ class DropSystem(commands.Cog):
 
                 # Update embed to show "Ended" status
                 now = discord.utils.utcnow()
-                timestamp = int(now.timestamp())
+                completed_time = discord.utils.utcnow()
 
                 embed.color = 0x36393f  # Darker gray for ended drops
-                embed.description = f"<:sukoon_blackdot:1322894649488314378> Completed at: <t:{timestamp}:f>\n<:sukoon_redpoint:1322894737736339459> Winners: {mentions}\n<:sukoon_blackdot:1322894649488314378> Hosted by: <@{drop[4]}>"
+                embed.description = f"<:sukoon_blackdot:1322894649488314378> {format_time_ago(completed_time)}\n<:sukoon_redpoint:1322894737736339459> Winners: {mentions}\n<:sukoon_blackdot:1322894649488314378> Hosted by: <@{drop[4]}>"
 
-                # Clear fields and set author to prize name
+                # Clear fields and set author to prize name with server icon
                 embed.clear_fields()
-                embed.set_author(name=drop[5])  # prize_name
-                embed.set_footer(text=drop[9] or f"at {discord.utils.utcnow().strftime('%H:%M')} • Powered by {chan.guild.me.display_name}")
+                embed.set_author(
+                    name=drop[5],  # prize_name
+                    icon_url=chan.guild.icon.url if chan.guild.icon else None
+                )
+                embed.set_footer(text=drop[9] or f"Powered by {chan.guild.me.display_name} • {format_timestamp(completed_time)}")
             else:
                 # Keep original view active
                 view = DropButton(drop_id=drop[0], emoji=drop[8])  # id, emoji
@@ -496,6 +543,10 @@ class DropSystem(commands.Cog):
                 title=f"Stats for Drop `{drop_id}`",
                 color=0x2f3136
             )
+            embed.set_author(
+                name="Drop Statistics",
+                icon_url=ctx.guild.icon.url if ctx.guild.icon else None
+            )
             embed.add_field(name="Prize", value=drop[5], inline=False)  # prize_name
             embed.add_field(name="Winners", value=f"{total}/{drop[6]}")  # winner_count
             embed.add_field(name="Avg. Time-to-Claim", value=avg_str)
@@ -533,6 +584,10 @@ class DropSystem(commands.Cog):
                 title="🏆 Drop Leaderboard",
                 description="\n".join(lines),
                 color=0x2f3136
+            )
+            embed.set_author(
+                name="Global Leaderboard",
+                icon_url=ctx.guild.icon.url if ctx.guild.icon else None
             )
             await ctx.reply(embed=embed, ephemeral=True)
 
