@@ -11,3 +11,4 @@ pyfiglet
 pymongo
 pytz
 PyNaCl
+deep-translator>=1.11.4
