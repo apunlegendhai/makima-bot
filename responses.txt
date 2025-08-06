@@ -1,31 +1,50 @@
-@user, आपको देखकर auto-ban वाला बटन खुद दब गया।
-@user, तुमसे अच्छा तो वो bot है जो चुपचाप काम करता है।
-@user, सर्वर में बुरा असर था, अब तुम गए तो चैन आया।
-@user, तुम्हारी वजह से हम सोच रहे थे सर्वर को डिलीट कर दें।
-@user, server को toxic होने से बचाया, अब तुम बाहर हो।
-@user, अपनी stupidity को घर पर छोड़ आओ, ये सर्वर नहीं है तुम्हारी playground।
-@user, किसी और server में जा के और उथल-पुथल मचाओ, यहाँ नहीं चलेगा।
-@user, तुमने खुद को जो हद में रखा था, अब वो लिमिट पार कर दी।
-@user, सर्वर का atmosphere अब तुम्हारे बिना हल्का हो गया।
-@user, तुम्हारी बातों से तो server crash हो जाता था, अब चुप है।
-@user, जितनी बुरी तुम्हारी बातें थी, उतनी ही जल्दी बैन कर दिया गया।
-@user, तुम वो toxic चूहा हो जो खुद को सबसे स्मार्ट समझती हो, पर ban होते ही तुम्हारी असली पहचान सामने आ गई।
-@user, तुम्हारे बिना server में कुछ भी बदलने वाली नहीं थी, अब तुम गई तो server का ban काफी हल्का महसूस हो रहा है।
-@user, तुम्हारे जैसे users को ban करना server का एक कदम सही दिशा में था, और अब सब शांति से काम कर पाएंगे।
-@user, मैं तुम्हें ban करने के बाद भी server की quality वापस लाने की कोशिश करूंगी, पर अब तक तो वो ban ही सबसे अच्छा था।
-@user, तुम्हारा ban इस server के लिए एक blessing in disguise था, अब server ने चैन की सांस ली है।
-@user, तुम्हारी बातें सुनकर server भी आत्महत्या करने वाली थी, पर ban के बाद सब ठीक हो गया।
-@user, तुम्हें ban करने के बाद server की air quality में 10% सुधार हुआ है, तुम्हारे ban ने सबको राहत दी।
-@user, तुम जैसी लोग सिर्फ server के bandwidth को चूसती हो, इसलिए तुम्हें ban कर दिया गया, अब server में जगह खाली हुई।
-@user, तुम्हारे ban होने से server में कुछ space आया है, अब सब आराम से काम कर सकेंगे, बिना किसी रुकावट के।
-@user, ban तो कर दिया, पर अभी भी तुम्हारी हंसी server में गूंज रही है, क्योंकि तुम्हारा ban सबको याद रहेगा।
-@user, तुम वो toxic चूहा हो जो खुद को सबसे स्मार्ट समझती हो, लेकिन ban होने के बाद तुम्हें अपनी औकात समझ आ गई।
-@user, तुम्हारे बिना server में कुछ भी नहीं बदलने वाली थी, अब तुम गई हो तो ban के बाद सब कुछ सही हो गया है।
-@user, तुम्हारे जैसे users को ban करना server के लिए सबसे अच्छा फैसला था, अब शांति से काम हो सकेगा।
-@user, तुम्हें ban कर दिया है, अब server की quality वापस आएगी, ये ban ही सब कुछ है।
-@user, तुम्हारा ban इस server के लिए एक blessing in disguise था, अब सब लोग आराम से काम कर सकेंगे।
-@user, तुम्हारी बातें सुनकर server भी आत्महत्या करने वाली थी, लेकिन तुम्हारे ban से सब ठीक हो गया।
-@user, तुम्हें ban करने के बाद server की air quality 20% सुधर गई है, अब हम सब को सांस लेने की जगह मिल रही है।
-@user, तुम जैसी लोग server का bandwidth चूसती हो, इसलिए तुम्हें ban कर दिया गया, अब server का काम सही तरीके से होगा।
-@user, तुम्हारे ban होने से server में बहुत सी जगह खाली हुई है, अब सब आराम से काम कर सकते हैं।
-@user, ban तो कर दिया, अब तुम्हारी हंसी की आवाज भी server में नहीं गूंजेगी।
+@user, teri maa ki chut mein wifi lagwa diya, ab signal nahi aayenge!
+@user, behen ke lode, server ki hawa kharab kar di thi tune!
+@user, randi ke bachhe, ab nikal yahan se!
+@user, chinnar, teri bakchodi ka quota poora ho gaya!
+@user, teri behen chod diya gaya, ab tu bhi ja!
+@user, teri maa ka bhosda, server ki safai ho gayi!
+@user, bhadwe, ab teri entry yahan band hai!
+@user, chutiye, server ki izzat loot li tune, ab ban ho ja!
+@user, madarchod, ab teri bakwas nahi sahi jaayegi!
+@user, behen ke takke, ab tu sirf yaadon mein rahega!
+@user, teri maa ki chut, ab server mein mat dikhna!
+@user, randi ke pille, ab teri aukaat dikh gayi!
+@user, chutiya samajh ke rakha tha, par tu toh usse bhi aage nikla!
+@user, teri maa ka bhosda, ab tu ban ho gaya!
+@user, behen ke laude, server ki shaan badh gayi tere jaane se!
+@user, madarchod, ab tu sirf blocklist mein dikhai dega!
+@user, chutiye, server ki gandagi saaf ho gayi!
+@user, teri maa ki chut mein jhaadu laga diya!
+@user, behen ke lode, ab tu yahan nahi dikhega!
+@user, randi ke bachhe, ab tu server se bahar!
+@user, chinnar, ab teri bakchodi band!
+@user, teri behen chod diya gaya, ab tu bhi ban ho gaya!
+@user, teri maa ka bhosda, ab server ki izzat bach gayi!
+@user, bhadwe, ab tu sirf ban list mein hai!
+@user, chutiye, ab teri bakwas nahi chalegi!
+@user, teri maa ki chut mein broadband lag gaya, ab tu offline hi rahega!
+@user, behen ke lode, server ki hawa ab saaf hai!
+@user, randi ke bachhe, ab tu sirf block mein hai!
+@user, chinnar, teri bakchodi ka the end ho gaya!
+@user, teri behen chod diya gaya, ab tu bhi gaya!
+@user, teri maa ka bhosda, ab tu history ban gaya!
+@user, bhadwe, ab teri entry yahan se band hai!
+@user, chutiye, server ki izzat ab bach gayi!
+@user, madarchod, ab teri bakwas nahi sahi jaayegi!
+@user, behen ke takke, ab tu sirf yaadon mein rahega!
+@user, teri maa ki chut, ab server mein mat dikhna!
+@user, randi ke pille, ab teri aukaat dikh gayi!
+@user, chutiya samajh ke rakha tha, par tu toh usse bhi aage nikla!
+@user, teri maa ka bhosda, ab tu ban ho gaya!
+@user, behen ke laude, server ki shaan badh gayi tere jaane se!
+@user, madarchod, ab tu sirf blocklist mein dikhai dega!
+@user, chutiye, server ki gandagi saaf ho gayi!
+@user, teri maa ki chut mein jhaadu laga diya!
+@user, behen ke lode, ab tu yahan nahi dikhega!
+@user, randi ke bachhe, ab tu server se bahar!
+@user, chinnar, ab teri bakchodi band!
+@user, teri behen chod diya gaya, ab tu bhi ban ho gaya!
+@user, teri maa ka bhosda, ab server ki izzat bach gayi!
+@user, bhadwe, ab tu sirf ban list mein hai!
+@user, chutiye, ab teri bakwas nahi chalegi!
