@@ -1,8 +1,9 @@
 import discord
 from discord.ext import commands
+from discord import app_commands
 import asyncio
 import logging
-from typing import Optional, List, Dict, Tuple, Union
+from typing import Optional, List, Dict, Tuple, Union, Set
 from discord.ui import Button, View
 
 import os
@@ -42,6 +43,14 @@ class VoiceManager(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.user_locks: Dict[int, asyncio.Lock] = {}
+        # Keep strong references to interactive views so timeouts work
+        self.active_summon_views: Set[discord.ui.View] = set()
+
+    def register_view(self, view: discord.ui.View) -> None:
+        self.active_summon_views.add(view)
+
+    def unregister_view(self, view: discord.ui.View) -> None:
+        self.active_summon_views.discard(view)
 
     def get_user_lock(self, user_id: int) -> asyncio.Lock:
         if user_id not in self.user_locks:
@@ -522,6 +531,8 @@ class VoiceManager(commands.Cog):
         async def on_timeout(self):
             if self.response:
                 await self.response.edit(content="<a:003_bel:1341822673247797319> Summon request timed out.", view=None)
+            # Drop our reference so GC can clean it up after timeout
+            self.cog.unregister_view(self)
 
         @discord.ui.button(label="Accept", style=discord.ButtonStyle.green)
         async def accept(self, interaction: discord.Interaction, button: Button):
@@ -541,6 +552,7 @@ class VoiceManager(commands.Cog):
                         if self.response:
                             self.stop()
                             await self.response.edit(content=f"<a:sukoon_whitetick:1323992464058482729> Moved to `{self.target_channel.name}`.", view=None)
+                            self.cog.unregister_view(self)
                         return
                     except discord.Forbidden:
                         await interaction.followup.send("I don't have permission to move members between voice channels.")
@@ -596,6 +608,7 @@ class VoiceManager(commands.Cog):
                 if self.response:
                     self.stop()
                     await self.response.edit(content=f"<a:sukoon_whitetick:1323992464058482729> A one-time invite link has been sent to you for `{self.target_channel.name}`.", view=None)
+                    self.cog.unregister_view(self)
 
                 # Wait for the user to join or for timeout
                 try:
@@ -628,6 +641,7 @@ class VoiceManager(commands.Cog):
             if self.response:
                 self.stop()
                 await self.response.edit(content="<a:sukoon_reddot:1322894157794119732> Summon declined.", view=None)
+                self.cog.unregister_view(self)
             await interaction.followup.send("You declined the summon.")
 
     @commands.command(name="summon")
@@ -637,18 +651,23 @@ class VoiceManager(commands.Cog):
         Summon a user to your voice channel via DM.
         Usage: .summon @user (must be used in your voice channel's text channel)
         """
+        # Delete the invoking message to avoid pinging the mentioned user in the server
+        try:
+            await ctx.message.delete()
+        except (discord.Forbidden, discord.HTTPException):
+            pass
         # Check if in a guild
         if not ctx.guild:
-            return await ctx.send("<a:sukoon_reddot:1322894157794119732> This command can only be used in a server.")
+            return await ctx.send("<a:sukoon_reddot:1322894157794119732> This command can only be used in a server.", allowed_mentions=discord.AllowedMentions.none())
 
         # Check if command user is in a voice channel
         if not ctx.author.voice or not ctx.author.voice.channel:
-            return await ctx.send("<:sukoon_info:1323251063910043659> You must be in a voice channel to use this command.")
+            return await ctx.send("<:sukoon_info:1323251063910043659> You must be in a voice channel to use this command.", allowed_mentions=discord.AllowedMentions.none())
 
         # Check if both users are in the same guild
         mutual_guilds = [g for g in self.bot.guilds if g.get_member(ctx.author.id) and g.get_member(user.id)]
         if not mutual_guilds:
-            return await ctx.send("<a:sukoon_reddot:1322894157794119732> You don't share any servers with this user.")
+            return await ctx.send("<a:sukoon_reddot:1322894157794119732> You don't share any servers with this user.", allowed_mentions=discord.AllowedMentions.none())
 
         # Find the command user in a voice channel
         command_user_voice = None
@@ -662,7 +681,7 @@ class VoiceManager(commands.Cog):
                 break
 
         if not command_user_voice:
-            return await ctx.send("<:sukoon_info:1323251063910043659> Join a voice channel in a mutual server first.")
+            return await ctx.send("<:sukoon_info:1323251063910043659> Join a voice channel in a mutual server first.", allowed_mentions=discord.AllowedMentions.none())
 
         # Get target member
         target_member = command_user_guild.get_member(user.id)
@@ -678,11 +697,11 @@ class VoiceManager(commands.Cog):
         # Check bot permissions for moving users
         bot_member = command_user_guild.get_member(self.bot.user.id)
         if not bot_member:
-            return await ctx.send("<a:sukoon_reddot:1322894157794119732> I'm not in this guild properly.")
+            return await ctx.send("<a:sukoon_reddot:1322894157794119732> I'm not in this guild properly.", allowed_mentions=discord.AllowedMentions.none())
 
         bot_perms = command_user_voice.permissions_for(bot_member)
         if not bot_perms.move_members:
-            return await ctx.send("<a:sukoon_reddot:1322894157794119732> I need Move Members permission.")
+            return await ctx.send("<a:sukoon_reddot:1322894157794119732> I need Move Members permission.", allowed_mentions=discord.AllowedMentions.none())
 
         # Try to DM the target user
         view = self.SummonView(self, target_member, command_user_voice)
@@ -693,16 +712,84 @@ class VoiceManager(commands.Cog):
                       f"{'<:sukoon_info:1323251063910043659> Please join a voice channel first to accept this invitation.' if not target_member.voice else ''}")
             response = await dm.send(message, view=view)
             view.response = response
-            await ctx.send(f"<a:sukoon_whitetick:1323992464058482729> Summon request sent to {user.display_name}.")
+            await ctx.send(f"<a:sukoon_whitetick:1323992464058482729> Summon request sent to {user.display_name}.", allowed_mentions=discord.AllowedMentions.none())
         except discord.Forbidden:
-            await ctx.send(f"<a:sukoon_reddot:1322894157794119732> I can't DM {user.display_name}. They may have DMs turned off.")
+            await ctx.send(f"<a:sukoon_reddot:1322894157794119732> I can't DM {user.display_name}. They may have DMs turned off.", allowed_mentions=discord.AllowedMentions.none())
         except Exception as e:
-            await ctx.send(f"<a:sukoon_reddot:1322894157794119732> Error: {e}")
+            await ctx.send(f"<a:sukoon_reddot:1322894157794119732> Error: {e}", allowed_mentions=discord.AllowedMentions.none())
 
     @summon.error
     async def summon_error(self, ctx, error):
-        await ctx.send(f"<a:sukoon_reddot:1322894157794119732> Error: {error}")
+        await ctx.send(f"<a:sukoon_reddot:1322894157794119732> Error: {error}", allowed_mentions=discord.AllowedMentions.none())
 
+
+    @app_commands.command(name="summon", description="Summon a user to your voice channel via DM (no ping in channel)")
+    @app_commands.describe(user="User to summon")
+    async def summon_slash(self, interaction: discord.Interaction, user: discord.Member):
+        """Slash version of summon that avoids pings in the channel entirely."""
+        # Always defer quickly so Discord doesn't time out
+        await interaction.response.defer(ephemeral=True)
+
+        # This command only works in guilds
+        if not interaction.guild:
+            return await interaction.followup.send(
+                "<a:sukoon_reddot:1322894157794119732> This command can only be used in a server.",
+                ephemeral=True
+            )
+
+        invoker_member = interaction.guild.get_member(interaction.user.id)
+        if not invoker_member or not invoker_member.voice or not invoker_member.voice.channel:
+            return await interaction.followup.send(
+                "<:sukoon_info:1323251063910043659> You must be in a voice channel to use this command.",
+                ephemeral=True
+            )
+
+        vc = invoker_member.voice.channel
+
+        # Check bot permissions for moving users
+        bot_member = interaction.guild.get_member(self.bot.user.id)
+        if not bot_member:
+            return await interaction.followup.send(
+                "<a:sukoon_reddot:1322894157794119732> I'm not in this guild properly.",
+                ephemeral=True
+            )
+
+        bot_perms = vc.permissions_for(bot_member)
+        if not bot_perms.move_members:
+            return await interaction.followup.send(
+                "<a:sukoon_reddot:1322894157794119732> I need Move Members permission.",
+                ephemeral=True
+            )
+
+        # Prepare interactive DM view
+        view = self.SummonView(self, user, vc)
+        # Register to keep strong reference so timeout runs
+        self.register_view(view)
+        try:
+            dm = await user.create_dm()
+            message = (f"<a:heartspar:1335854160322498653> {interaction.user} is summoning you to join their voice channel: **{vc.name}** "
+                       f"in **{interaction.guild.name}**.\n"
+                       f"{'<:sukoon_info:1323251063910043659> Please join a voice channel first to accept this invitation.' if not user.voice else ''}")
+            response = await dm.send(message, view=view)
+            view.response = response
+            await interaction.followup.send(
+                f"<a:sukoon_whitetick:1323992464058482729> Summon request sent to {user.display_name}.",
+                ephemeral=True
+            )
+        except discord.Forbidden:
+            await interaction.followup.send(
+                f"<a:sukoon_reddot:1322894157794119732> I can't DM {user.display_name}. They may have DMs turned off.",
+                ephemeral=True
+            )
+            # Cleanup the registered view since DM send failed
+            self.unregister_view(view)
+        except Exception as e:
+            await interaction.followup.send(
+                f"<a:sukoon_reddot:1322894157794119732> Error: {e}",
+                ephemeral=True
+            )
+            # Cleanup on error
+            self.unregister_view(view)
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(VoiceManager(bot))
