@@ -1,821 +1,583 @@
 import discord
-import logging
-import os
-import aiosqlite
 from discord.ext import commands
-from dotenv import load_dotenv
+import aiosqlite
+import os
 import asyncio
-import re
-from typing import Dict, Optional, List
-import functools
-import logging.handlers
-import pathlib
+from typing import Dict, List, Optional, Union
 
-# Create necessary directories
-pathlib.Path("database").mkdir(exist_ok=True)
-pathlib.Path("logs").mkdir(exist_ok=True)
-
-# Load environment variables
-load_dotenv()
-
-# Enhanced logging configuration
-logger = logging.getLogger('role_management_bot')
-logger.setLevel(logging.INFO)
-file_handler = logging.handlers.RotatingFileHandler(
-    'logs/bot_logs.log',
-    maxBytes=10 * 1024 * 1024,  # 10 MB
-    backupCount=5
-)
-console_handler = logging.StreamHandler()
-formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
-file_handler.setFormatter(formatter)
-console_handler.setFormatter(formatter)
-logger.addHandler(file_handler)
-logger.addHandler(console_handler)
-
-# Configuration Constants
-EMBED_COLOR = 0x2f2136
-DEFAULT_ROLE_LIMIT = 5
-MAX_ROLE_LIMIT = 15
-MIN_ROLE_LIMIT = 1
-EMOJI_SUCCESS = "<a:sukoon_whitetick:1323992464058482729>"
-EMOJI_INFO = "<:sukoon_info:1323251063910043659>"
-DB_PATH = "database/role_management.db"
-
-
-class RoleManagementConfig:
-    """
-    Immutable configuration for a guild's role management.
-    `role_mappings` maps each custom_name → a list of role IDs.
-    """
-    def __init__(
-        self,
-        guild_id: int,
-        reqrole_id: Optional[int] = None,
-        role_mappings: Dict[str, List[int]] = None,
-        log_channel_id: Optional[int] = None,
-        role_assignment_limit: int = DEFAULT_ROLE_LIMIT
-    ):
-        self.guild_id = guild_id
-        self.reqrole_id = reqrole_id
-        # Each custom_name → List of role IDs
-        self.role_mappings = role_mappings or {}
-        self.log_channel_id = log_channel_id
-        # Ensure the limit stays within our min/max bounds
-        self.role_assignment_limit = max(
-            MIN_ROLE_LIMIT,
-            min(role_assignment_limit, MAX_ROLE_LIMIT)
-        )
-
-
-class RoleManagement(commands.Cog):
+class RoleManager(commands.Cog, name="Role Management"):
+    """Role management system with custom role names and required role for permissions"""
+    
     def __init__(self, bot):
         self.bot = bot
-        self.db_path = DB_PATH
-
-        # Thread-safe config cache
-        self.guild_configs: Dict[int, RoleManagementConfig] = {}
-        self.config_lock = asyncio.Lock()
-
-        # Keep track of dynamically created command names per guild
-        self.dynamic_commands: Dict[int, List[str]] = {}
-
-    async def initialize_database(self):
-        """Initialize SQLite database with the required tables (including multi-role schema)."""
-        try:
-            async with aiosqlite.connect(self.db_path) as db:
-                # guild_config table
-                await db.execute(f'''
-                    CREATE TABLE IF NOT EXISTS guild_config (
-                        guild_id INTEGER PRIMARY KEY,
-                        reqrole_id INTEGER,
-                        log_channel_id INTEGER,
-                        role_assignment_limit INTEGER DEFAULT {DEFAULT_ROLE_LIMIT}
-                    )
-                ''')
-
-                # role_mappings: (guild_id, custom_name, role_id) → composite PK
-                await db.execute('''
-                    CREATE TABLE IF NOT EXISTS role_mappings (
-                        guild_id INTEGER,
-                        custom_name TEXT,
-                        role_id INTEGER,
-                        PRIMARY KEY (guild_id, custom_name, role_id),
-                        FOREIGN KEY (guild_id)
-                            REFERENCES guild_config(guild_id)
-                            ON DELETE CASCADE
-                    )
-                ''')
-                await db.commit()
-                logger.info("Database initialized with multi-role schema.")
-        except aiosqlite.Error as e:
-            logger.error(f"SQLite error during database initialization: {e}")
-            raise
-        except Exception as e:
-            logger.error(f"Unexpected error during database initialization: {e}")
-            raise
-
-    @functools.lru_cache(maxsize=100)
-    def sanitize_role_name(self, name: str) -> str:
-        """Cached, consistent role name sanitization (lowercase alphanumerics only)."""
-        return re.sub(r'[^a-z0-9]', '', name.lower())
-
-    async def initial_config_load(self):
-        """Load configurations for all guilds on startup and regenerate dynamic commands."""
-        try:
-            await asyncio.sleep(2)  # Give the DB a moment to initialize
-            for guild in self.bot.guilds:
-                config = await self.load_guild_config(guild.id)
-                await self.generate_dynamic_commands(config)
-            logger.info(
-                f"Loaded configurations for {len(self.bot.guilds)} guild(s) and re-registered dynamic commands."
-            )
-        except Exception as e:
-            logger.error(f"Initial configuration load error: {e}")
-
-    async def periodic_config_cleanup(self):
-        """
-        Every 12 hours, remove dynamic commands for any guild the bot has left.
-        (We keep the DB rows around but drop in-memory commands.)
-        """
-        while True:
-            try:
-                async with self.config_lock:
-                    current_guild_ids = {guild.id for guild in self.bot.guilds}
-                    for guild_id in list(self.dynamic_commands.keys()):
-                        if guild_id not in current_guild_ids:
-                            # Remove every command name we registered for that guild
-                            for cmd_name in self.dynamic_commands[guild_id]:
-                                try:
-                                    self.bot.remove_command(cmd_name)
-                                except Exception as cmd_err:
-                                    logger.error(f"Error removing command {cmd_name}: {cmd_err}")
-                            del self.dynamic_commands[guild_id]
-            except Exception as e:
-                logger.error(f"Configuration cleanup error: {e}")
-
-            # Sleep 12 hours
-            await asyncio.sleep(12 * 60 * 60)
-
-    async def load_guild_config(self, guild_id: int) -> RoleManagementConfig:
-        """
-        Load—or create—a guild configuration. Checks in-memory cache first,
-        then falls back to the database. If no row exists, insert a default.
-        """
-        # First, check the cache
-        async with self.config_lock:
-            if guild_id in self.guild_configs:
-                return self.guild_configs[guild_id]
-
-        # Not in cache, try the database
-        try:
-            async with aiosqlite.connect(self.db_path) as db:
-                # Get the guild_config row
-                async with db.execute(
-                    "SELECT reqrole_id, log_channel_id, role_assignment_limit FROM guild_config WHERE guild_id = ?",
-                    (guild_id,)
-                ) as cursor:
-                    row = await cursor.fetchone()
-
-                # If no row, create a default config
-                if not row:
-                    try:
-                        # Insert a default row
-                        await db.execute(
-                            "INSERT INTO guild_config (guild_id, role_assignment_limit) VALUES (?, ?)",
-                            (guild_id, DEFAULT_ROLE_LIMIT)
-                        )
-                        await db.commit()
-                        logger.info(f"Created default config for guild {guild_id}")
-                        # Return a default config
-                        config = RoleManagementConfig(guild_id=guild_id)
-                    except aiosqlite.Error as e:
-                        logger.error(f"Failed to create default config for guild {guild_id}: {e}")
-                        # Return a default config without saving to DB
-                        return RoleManagementConfig(guild_id=guild_id)
-                else:
-                    # We have a row, get the role mappings
-                    reqrole_id, log_channel_id, role_assignment_limit = row
-                    role_mappings = {}
-
-                    try:
-                        # Get all role mappings for this guild
-                        async with db.execute(
-                            "SELECT custom_name, role_id FROM role_mappings WHERE guild_id = ?",
-                            (guild_id,)
-                        ) as cursor:
-                            async for mapping_row in cursor:
-                                custom_name, role_id = mapping_row
-                                if custom_name not in role_mappings:
-                                    role_mappings[custom_name] = []
-                                role_mappings[custom_name].append(role_id)
-                    except aiosqlite.Error as e:
-                        logger.error(f"Failed to load role mappings for guild {guild_id}: {e}")
-                        # Continue with empty role mappings
-                        role_mappings = {}
-
-                    # Create the config object
-                    config = RoleManagementConfig(
-                        guild_id=guild_id,
-                        reqrole_id=reqrole_id,
-                        role_mappings=role_mappings,
-                        log_channel_id=log_channel_id,
-                        role_assignment_limit=role_assignment_limit
-                    )
-
-            # Cache the config
-            async with self.config_lock:
-                self.guild_configs[guild_id] = config
-
-            # Generate dynamic commands for this guild
-            await self.generate_dynamic_commands(config)
-
-            return config
-        except aiosqlite.Error as e:
-            logger.error(f"Database error loading guild config for {guild_id}: {e}")
-            # Return a default config as fallback
-            return RoleManagementConfig(guild_id=guild_id)
-        except Exception as e:
-            logger.error(f"Unexpected error loading guild config for {guild_id}: {e}")
-            # Return a default config as fallback
-            return RoleManagementConfig(guild_id=guild_id)
-
-    async def save_guild_config(self, config: RoleManagementConfig):
-        """
-        Save (insert or update) guild_config row and all role_mappings.
-        Then regenerate dynamic commands with the fresh configuration.
-        """
-        try:
-            async with self.config_lock:
-                async with aiosqlite.connect(self.db_path) as db:
-                    try:
-                        # Upsert guild_config
-                        await db.execute(
-                            """
-                            INSERT INTO guild_config (
-                                guild_id,
-                                reqrole_id,
-                                log_channel_id,
-                                role_assignment_limit
-                            ) VALUES (?, ?, ?, ?)
-                            ON CONFLICT(guild_id) DO UPDATE SET
-                                reqrole_id = excluded.reqrole_id,
-                                log_channel_id = excluded.log_channel_id,
-                                role_assignment_limit = excluded.role_assignment_limit
-                            """,
-                            (
-                                config.guild_id,
-                                config.reqrole_id,
-                                config.log_channel_id,
-                                config.role_assignment_limit
-                            )
-                        )
-
-                        # Delete existing role_mappings for this guild
-                        await db.execute(
-                            "DELETE FROM role_mappings WHERE guild_id = ?",
-                            (config.guild_id,)
-                        )
-
-                        # Insert each (custom_name, role_id) pair
-                        for custom_name, role_id_list in config.role_mappings.items():
-                            for rid in role_id_list:
-                                await db.execute(
-                                    "INSERT INTO role_mappings (guild_id, custom_name, role_id) VALUES (?, ?, ?)",
-                                    (config.guild_id, custom_name, rid)
-                                )
-
-                        await db.commit()
-                        logger.info(f"Successfully saved config for guild {config.guild_id}")
-                    except aiosqlite.Error as e:
-                        # Rollback transaction on error
-                        await db.rollback()
-                        logger.error(f"Database error saving config for guild {config.guild_id}: {e}")
-                        raise
-
-                # Update cache
-                self.guild_configs[config.guild_id] = config
-
-                # Regenerate dynamic commands from this updated config
-                await self.generate_dynamic_commands(config)
-
-        except aiosqlite.Error as e:
-            logger.error(f"SQLite error saving config for guild {config.guild_id}: {e}")
-        except Exception as e:
-            logger.error(f"Unexpected error saving config for guild {config.guild_id}: {e}")
-
-    async def generate_dynamic_commands(self, config: RoleManagementConfig):
-        """
-        For each `custom_name` in config.role_mappings (with a list of role IDs),
-        create a single command named `<custom_name>` that toggles all of those roles at once.
-        Each command is "locked" to the guild that created it.
-        """
-        guild_id = config.guild_id
-
-        # Remove previously registered commands for this guild
-        if guild_id in self.dynamic_commands:
-            for cmd_name in self.dynamic_commands[guild_id]:
-                try:
-                    self.bot.remove_command(cmd_name)
-                except Exception as e:
-                    logger.error(f"Error removing command {cmd_name}: {e}")
-            del self.dynamic_commands[guild_id]
-
-        self.dynamic_commands[guild_id] = []
-        built_in_commands = {cmd.name for cmd in self.bot.commands}
-
-        # Create a command for each custom_name → list_of_role_ids
-        for custom_name, role_id_list in config.role_mappings.items():
-            if custom_name in built_in_commands:
-                logger.warning(
-                    f"Skipping dynamic command '{custom_name}' as it conflicts with a built-in command."
-                )
-                continue
-
-            # Create a new command function
-            async def dynamic_role_command(ctx, member: discord.Member = None, *, _role_ids=role_id_list, _cmd_name=custom_name, _owner_guild_id=guild_id):
-                # *** PER-SERVER LOCK: if run outside its "home" guild, do nothing. ***
-                if not ctx.guild or ctx.guild.id != _owner_guild_id:
-                    return
-
-                # Always fetch a fresh config at runtime
-                current_config = await self.load_guild_config(ctx.guild.id)
-
-                # 1) Required-role check
-                if not await self.check_required_role(ctx, current_config):
-                    return
-
-                # 2) Make sure a member was mentioned
-                if not member:
-                    await ctx.send(
-                        embed=discord.Embed(
-                            description=(
-                                f"{EMOJI_INFO} | Please mention a user to assign or remove "
-                                f"the '{_cmd_name}' role group."
-                            ),
-                            color=EMBED_COLOR
-                        )
-                    )
-                    return
-
-                # 3) Resolve each role object from its ID
-                roles_to_toggle = []
-                for rid in _role_ids:
-                    r = ctx.guild.get_role(rid)
-                    if r:
-                        roles_to_toggle.append(r)
-
-                if not roles_to_toggle:
-                    await ctx.send(
-                        embed=discord.Embed(
-                            description=(
-                                f"{EMOJI_INFO} | None of the roles mapped to '{_cmd_name}' exist anymore."
-                            ),
-                            color=EMBED_COLOR
-                        )
-                    )
-                    return
-
-                await self._process_role_toggle(ctx, member, roles_to_toggle, _cmd_name, current_config)
-
-            # Create a proper Command object
-            cmd = commands.Command(
-                dynamic_role_command,
-                name=custom_name,
-                help=f"Toggle the '{custom_name}' role group for a member."
-            )
+        self.db_folder = "database"
+        self.db_path = os.path.join(self.db_folder, "reqrole.db")
+        self.bot.loop.create_task(self.setup_database())
+        
+    async def setup_database(self):
+        """Set up the database and tables if they don't exist"""
+        # Create database directory if it doesn't exist
+        if not os.path.exists(self.db_folder):
+            os.makedirs(self.db_folder)
             
-            # Add the command to the bot
-            self.bot.add_command(cmd)
-            self.dynamic_commands[guild_id].append(custom_name)
-            logger.info(f"Registered dynamic command: {custom_name} for guild {guild_id}")
+        async with aiosqlite.connect(self.db_path) as db:
+            # Create table for required role (reqrole)
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS reqrole (
+                    guild_id INTEGER PRIMARY KEY,
+                    role_id INTEGER NOT NULL
+                )
+            ''')
             
-    async def _process_role_toggle(self, ctx, member, roles_to_toggle, cmd_name, config):
-        """Process role toggling for a member based on the command."""
-        # Determine which roles the member already has
-        member_current_roles = {r.id for r in member.roles}
-        want_to_remove_all = all(r.id in member_current_roles for r in roles_to_toggle)
-
-        if want_to_remove_all:
-            # Remove ALL mapped roles
-            try:
-                await member.remove_roles(*roles_to_toggle)
-                await ctx.send(
-                    embed=discord.Embed(
-                        description=(
-                            f"{EMOJI_SUCCESS} | Removed all roles in '{cmd_name}' from {member.mention}."
-                        ),
-                        color=EMBED_COLOR
-                    )
+            # Create table for custom role mappings
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS custom_roles (
+                    guild_id INTEGER NOT NULL,
+                    custom_name TEXT NOT NULL,
+                    role_id INTEGER NOT NULL,
+                    description TEXT,
+                    PRIMARY KEY (guild_id, custom_name, role_id)
                 )
-                # Log each removal separately
-                for role in roles_to_toggle:
-                    await self.log_role_action(ctx, member, role, "removed", config)
-            except discord.Forbidden:
-                await ctx.send(
-                    embed=discord.Embed(
-                        description=(
-                            f"{EMOJI_INFO} | I don't have permission to remove those roles."
-                        ),
-                        color=EMBED_COLOR
-                    )
+            ''')
+            
+            # Create table for log channels
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS log_channels (
+                    guild_id INTEGER PRIMARY KEY,
+                    channel_id INTEGER NOT NULL
                 )
-            except discord.HTTPException:
-                await ctx.send(
-                    embed=discord.Embed(
-                        description=(
-                            f"{EMOJI_INFO} | Something went wrong while removing roles."
-                        ),
-                        color=EMBED_COLOR
-                    )
-                )
-        else:
-            # We will add whichever roles the member does *not* already have
-            new_roles = [r for r in roles_to_toggle if r.id not in member_current_roles]
-
-            # Check assignment-limit
-            mapped_role_ids = [rid for sublist in config.role_mappings.values() for rid in sublist]
-            current_mapped_roles = [r for r in member.roles if r.id in mapped_role_ids]
-            already_count = len(current_mapped_roles)
-            to_add_count = len(new_roles)
-
-            if already_count + to_add_count > config.role_assignment_limit:
-                await ctx.send(
-                    embed=discord.Embed(
-                        description=(
-                            f"{EMOJI_INFO} | {member.mention} already has {already_count} mapped roles, "
-                            f"and adding {to_add_count} more would exceed the limit of "
-                            f"{config.role_assignment_limit}."
-                        ),
-                        color=EMBED_COLOR
-                    )
-                )
-                return
-
-            # Add all "new_roles" at once
-            try:
-                await member.add_roles(*new_roles)
-                await ctx.send(
-                    embed=discord.Embed(
-                        description=(
-                            f"{EMOJI_SUCCESS} | Added all roles in '{cmd_name}' to {member.mention}."
-                        ),
-                        color=EMBED_COLOR
-                    )
-                )
-                # Log each addition separately
-                for role in new_roles:
-                    await self.log_role_action(ctx, member, role, "added", config)
-            except discord.Forbidden:
-                await ctx.send(
-                    embed=discord.Embed(
-                        description=(
-                            f"{EMOJI_INFO} | I don't have permission to assign those roles."
-                        ),
-                        color=EMBED_COLOR
-                    )
-                )
-            except discord.HTTPException:
-                await ctx.send(
-                    embed=discord.Embed(
-                        description=(
-                            f"{EMOJI_INFO} | Something went wrong while assigning roles."
-                        ),
-                        color=EMBED_COLOR
-                    )
-                )
-
-    async def check_required_role(self, ctx, config: RoleManagementConfig) -> bool:
-        """
-        Ensures the invoker has the required “reqrole” (if one is set).
-        If none is set, or if the role no longer exists, or if the user lacks it,
-        we send an info message and return False.
-        """
-        if not config.reqrole_id:
-            await ctx.send(
-                embed=discord.Embed(
-                    description=(
-                        f"{EMOJI_INFO} | No required role has been set for this server. "
-                        f"Please ask an admin to set one."
-                    ),
-                    color=EMBED_COLOR
-                )
-            )
-            return False
-
-        required_role = ctx.guild.get_role(config.reqrole_id)
-        if not required_role:
-            await ctx.send(
-                embed=discord.Embed(
-                    description=(
-                        f"{EMOJI_INFO} | The required role set for this server no longer exists. "
-                        f"Please ask an admin to update it."
-                    ),
-                    color=EMBED_COLOR
-                )
-            )
-            return False
-
-        if required_role not in ctx.author.roles:
-            await ctx.send(
-                embed=discord.Embed(
-                    description=(
-                        f"{EMOJI_INFO} | You lack the required role (**{required_role.name}**) to use this command."
-                    ),
-                    color=EMBED_COLOR
-                )
-            )
-            return False
-
-        return True
-
-    async def log_role_action(
-        self,
-        ctx,
-        member: discord.Member,
-        role: discord.Role,
-        action: str,
-        config: RoleManagementConfig
-    ):
-        """If a log channel is set, post a message whenever a role is added/removed."""
-        if config.log_channel_id:
-            log_channel = ctx.guild.get_channel(config.log_channel_id)
-            if log_channel:
-                await log_channel.send(
-                    embed=discord.Embed(
-                        description=(
-                            f"{ctx.author.mention} {action} role '{role.name}' for {member.mention}."
-                        ),
-                        color=EMBED_COLOR
-                    )
-                )
-
-    @commands.command()
-    @commands.has_permissions(administrator=True)
-    async def setreqrole(self, ctx, role: discord.Role):
-        """
-        /setreqrole @Role
-        Defines the role that members must have in order to run any dynamic commands.
-        """
-        try:
-            config = await self.load_guild_config(ctx.guild.id)
-            new_config = RoleManagementConfig(
-                guild_id=config.guild_id,
-                reqrole_id=role.id,
-                role_mappings=config.role_mappings,
-                log_channel_id=config.log_channel_id,
-                role_assignment_limit=config.role_assignment_limit
-            )
-            await self.save_guild_config(new_config)
-            await ctx.send(
-                embed=discord.Embed(
-                    description=(
-                        f"{EMOJI_SUCCESS} | Required role for managing roles has been set to **{role.name}**."
-                    ),
-                    color=EMBED_COLOR
-                )
-            )
-        except Exception as e:
-            logger.error(f"Error in setreqrole command: {e}")
-            await ctx.send(
-                embed=discord.Embed(
-                    description=(
-                        f"{EMOJI_INFO} | An error occurred while setting the required role. Please try again."
-                    ),
-                    color=EMBED_COLOR
-                )
-            )
-
-    @commands.command()
-    @commands.has_permissions(administrator=True)
-    async def setrole(self, ctx, custom_name: str, *roles: discord.Role):
-        """
-        /setrole <custom_name> @RoleA @RoleB ...
+            ''')
+            
+            await db.commit()
     
-        Map a custom name to one or more roles. When someone runs:
-          .<custom_name> @member
-        it will toggle _all_ of those roles at once (but only in this guild).
+    async def get_reqrole(self, guild_id: int) -> Optional[int]:
+        """Get the required role ID for a guild"""
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute('SELECT role_id FROM reqrole WHERE guild_id = ?', (guild_id,)) as cursor:
+                result = await cursor.fetchone()
+                return result[0] if result else None
+    
+    async def get_custom_roles(self, guild_id: int, custom_name: str) -> List[int]:
+        """Get the role IDs mapped to a custom name"""
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute(
+                'SELECT role_id FROM custom_roles WHERE guild_id = ? AND custom_name = ?', 
+                (guild_id, custom_name.lower())
+            ) as cursor:
+                results = await cursor.fetchall()
+                return [result[0] for result in results] if results else []
+    
+    async def get_log_channel(self, guild_id: int) -> Optional[int]:
+        """Get the log channel ID for a guild"""
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute('SELECT channel_id FROM log_channels WHERE guild_id = ?', (guild_id,)) as cursor:
+                result = await cursor.fetchone()
+                return result[0] if result else None
+    
+    async def get_all_custom_roles(self, guild_id: int) -> Dict[str, List[Dict[str, Union[int, str]]]]:
+        """Get all custom role mappings for a guild"""
+        result = {}
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute(
+                'SELECT custom_name, role_id, description FROM custom_roles WHERE guild_id = ?', 
+                (guild_id,)
+            ) as cursor:
+                async for row in cursor:
+                    custom_name, role_id, description = row
+                    if custom_name not in result:
+                        result[custom_name] = []
+                    result[custom_name].append({
+                        "role_id": role_id,
+                        "description": description
+                    })
+        return result
+    
+    async def log_role_change(self, guild: discord.Guild, user: discord.Member, 
+                             roles: List[discord.Role], action: str, mod: discord.Member = None):
+        """Log role changes to the designated log channel"""
+        log_channel_id = await self.get_log_channel(guild.id)
+        if not log_channel_id:
+            return
+            
+        log_channel = guild.get_channel(log_channel_id)
+        if not log_channel:
+            return
+        
+        # Get moderator info
+        moderator_info = "System" if not mod else f"{mod.mention} ({mod.name}#{mod.discriminator} | {mod.id})"
+        
+        # Format roles with names and IDs
+        role_info = []
+        for role in roles:
+            role_info.append(f"{role.name} (ID: {role.id})")
+        role_text = "\n• ".join(role_info)
+        
+        # Create embed with detailed information
+        embed = discord.Embed(
+            title=f"Role {action}",
+            description=f"**Roles were {action.lower()} from the user**",
+            color=discord.Color.green() if action == "Added" else discord.Color.red(),
+            timestamp=discord.utils.utcnow()
+        )
+        
+        # Add target user field
+        embed.add_field(
+            name="Target User",
+            value=f"**Name:** {user.name}#{user.discriminator}\n"
+                  f"**Mention:** {user.mention}\n"
+                  f"**ID:** {user.id}",
+            inline=False
+        )
+        
+        # Add roles field
+        embed.add_field(
+            name=f"Roles {action}",
+            value=f"• {role_text}",
+            inline=False
+        )
+        
+        # Add moderator field
+        embed.add_field(
+            name="Action Performed By",
+            value=moderator_info,
+            inline=False
+        )
+        
+        # Add footer with timestamp
+        embed.set_footer(text=f"Action ID: {discord.utils.utcnow().timestamp():.0f}")
+        
+        # Add user avatar
+        embed.set_thumbnail(url=user.display_avatar.url)
+        
+        await log_channel.send(embed=embed)
+    
+    async def has_reqrole(self, ctx: commands.Context) -> bool:
+        """Check if the user has the required role to manage roles"""
+        if ctx.author.guild_permissions.administrator:
+            return True
+            
+        reqrole_id = await self.get_reqrole(ctx.guild.id)
+        if not reqrole_id:
+            await ctx.send("No required role has been set up. Administrators can set it up using `.setupreqrole`.")
+            return False
+            
+        reqrole = ctx.guild.get_role(reqrole_id)
+        if not reqrole:
+            await ctx.send("The configured required role no longer exists.")
+            return False
+            
+        if reqrole not in ctx.author.roles:
+            await ctx.send(f"You need the {reqrole.name} role to use this command.")
+            return False
+            
+        return True
+    
+    @commands.command(name="setupreqrole")
+    @commands.has_permissions(administrator=True)
+    async def setup_reqrole(self, ctx, role: discord.Role):
+        """Set up the required role for role management
+        
+        This role will be required to assign or remove roles from users.
+        Only administrators can set this up.
+        
+        Usage: .setupreqrole @role
+        Example: .setupreqrole @RoleManager
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                'INSERT OR REPLACE INTO reqrole (guild_id, role_id) VALUES (?, ?)',
+                (ctx.guild.id, role.id)
+            )
+            await db.commit()
+        
+        await ctx.send(f"Required role for role management has been set to {role.name}.")
+    
+    @commands.command(name="setrole")
+    @commands.has_permissions(administrator=True)
+    async def set_custom_role(self, ctx, custom_name: str, role: discord.Role, *, description: str = None):
+        """Map a custom name to an existing role
+        
+        Creates a command with the custom name that can be used to assign the role.
+        Only administrators can create these mappings.
+        
+        Usage: .setrole <custom_name> @role [description]
+        Example: .setrole staff @StaffMember Staff members can moderate chat
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                'INSERT OR REPLACE INTO custom_roles (guild_id, custom_name, role_id, description) VALUES (?, ?, ?, ?)',
+                (ctx.guild.id, custom_name.lower(), role.id, description)
+            )
+            await db.commit()
+        
+        await ctx.send(f"Custom role '{custom_name}' has been mapped to {role.name}.")
+    
+    @commands.command(name="removerole")
+    @commands.has_permissions(administrator=True)
+    async def remove_custom_role(self, ctx, custom_name: str, role: discord.Role = None):
+        """Remove a role mapping or all mappings for a custom name
+        
+        If a role is specified, only that role mapping will be removed.
+        If no role is specified, all mappings for the custom name will be removed.
+        
+        Usage: .removerole <custom_name> [@role]
+        Example: .removerole staff @StaffMember
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            if role:
+                await db.execute(
+                    'DELETE FROM custom_roles WHERE guild_id = ? AND custom_name = ? AND role_id = ?',
+                    (ctx.guild.id, custom_name.lower(), role.id)
+                )
+                await ctx.send(f"Removed mapping of '{custom_name}' to {role.name}.")
+            else:
+                await db.execute(
+                    'DELETE FROM custom_roles WHERE guild_id = ? AND custom_name = ?',
+                    (ctx.guild.id, custom_name.lower())
+                )
+                await ctx.send(f"Removed all mappings for custom role '{custom_name}'.")
+            
+            await db.commit()
+    
+    @commands.command(name="resetserver")
+    @commands.has_permissions(administrator=True)
+    async def reset_server(self, ctx):
+        """Reset all role configurations for this server
+        
+        Deletes all reqrole settings, custom role mappings, and log channel configurations.
+        Requires confirmation by typing 'confirm'.
+        
+        Usage: .resetserver
+        """
+        # Ask for confirmation
+        confirm_msg = await ctx.send("⚠️ **WARNING**: This will delete ALL role configurations for this server. "
+                                    "Type `confirm` within 30 seconds to proceed.")
+        
+        def check(m):
+            return m.author == ctx.author and m.channel == ctx.channel and m.content.lower() == "confirm"
+        
+        try:
+            await self.bot.wait_for('message', check=check, timeout=30.0)
+        except asyncio.TimeoutError:
+            await confirm_msg.edit(content="Server reset cancelled.")
+            return
+        
+        # Delete all server data
+        async with aiosqlite.connect(self.db_path) as db:
+            # Delete reqrole
+            await db.execute('DELETE FROM reqrole WHERE guild_id = ?', (ctx.guild.id,))
+            
+            # Delete custom roles
+            await db.execute('DELETE FROM custom_roles WHERE guild_id = ?', (ctx.guild.id,))
+            
+            # Delete log channel
+            await db.execute('DELETE FROM log_channels WHERE guild_id = ?', (ctx.guild.id,))
+            
+            await db.commit()
+        
+        await ctx.send("✅ All role configurations for this server have been reset.")
+    
+    @commands.command(name="deletemappedrole")
+    @commands.has_permissions(administrator=True)
+    async def delete_mapped_role(self, ctx, role_id: int):
+        """Delete a specific role mapping by role ID
+        
+        Removes a role from all custom name mappings by its ID.
+        Useful when the role no longer exists or needs to be removed from all mappings.
+        
+        Usage: .deletemappedrole <role_id>
+        Example: .deletemappedrole 123456789012345678
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            # Check if the role exists in any mapping
+            async with db.execute(
+                'SELECT custom_name FROM custom_roles WHERE guild_id = ? AND role_id = ?',
+                (ctx.guild.id, role_id)
+            ) as cursor:
+                mappings = await cursor.fetchall()
+            
+            if not mappings:
+                await ctx.send(f"No mappings found for role ID {role_id}.")
+                return
+            
+            # Delete the role from all mappings
+            await db.execute(
+                'DELETE FROM custom_roles WHERE guild_id = ? AND role_id = ?',
+                (ctx.guild.id, role_id)
+            )
+            await db.commit()
+        
+        # Get the role object if it exists
+        role = ctx.guild.get_role(role_id)
+        role_name = role.name if role else f"ID:{role_id}"
+        
+        # Format the custom names
+        custom_names = [f"`.{mapping[0]}`" for mapping in mappings]
+        
+        await ctx.send(f"✅ Deleted role {role_name} from the following mappings: {', '.join(custom_names)}")
+    
+    @commands.command(name="setlogchannel")
+    @commands.has_permissions(administrator=True)
+    async def set_log_channel(self, ctx, channel: discord.TextChannel):
+        """Set the channel for role change logs
+        
+        All role assignments and removals will be logged to this channel.
+        
+        Usage: .setlogchannel #channel
+        Example: .setlogchannel #role-logs
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                'INSERT OR REPLACE INTO log_channels (guild_id, channel_id) VALUES (?, ?)',
+                (ctx.guild.id, channel.id)
+            )
+            await db.commit()
+        
+        await ctx.send(f"Log channel has been set to {channel.mention}.")
+    
+    @commands.command(name="role", aliases=["roles"])
+    async def show_role_commands(self, ctx):
+        """Show all available role management commands
+        
+        Displays a list of all commands available in the role management system.
+        
+        Usage: .role
+        """
+        embed = discord.Embed(
+            title="Role Management Commands",
+            description="Here are all the available role management commands:",
+            color=discord.Color.blue()
+        )
+        
+        # Admin commands
+        admin_cmds = [
+            "`.setupreqrole @role` - Set the required role for role management",
+            "`.setrole <custom_name> @role [description]` - Map a custom name to a role",
+            "`.removerole <custom_name> [@role]` - Remove a role mapping or all mappings",
+            "`.setlogchannel #channel` - Set the channel for role change logs",
+            "`.clearroles @user` - Remove all custom roles from a user",
+            "`.resetserver` - Reset all role configurations for the server",
+            "`.deletemappedrole <role_id>` - Delete a specific role mapping by ID",
+            "`.setupmultirole <custom_name> @role1 @role2...` - Map multiple roles to one name"
+        ]
+        embed.add_field(name="Admin Commands", value="\n".join(admin_cmds), inline=False)
+        
+        # User commands (with reqrole)
+        user_cmds = [
+            "`.role` - Show this help message",
+            "`.rolelist` - List all custom role mappings",
+            "`.roledesc <custom_name>` - Show description for a custom role",
+            "`.custom_name @user` - Toggle a custom role for a user (e.g., `.staff @user`)"
+        ]
+        embed.add_field(name="Role Manager Commands", value="\n".join(user_cmds), inline=False)
+        
+        await ctx.send(embed=embed)
+    
+    @commands.command(name="rolelist")
+    async def list_custom_roles(self, ctx):
+        """List all custom role mappings in the server
+        
+        Shows all custom role names and the roles they are mapped to.
+        
+        Usage: .rolelist
+        """
+        custom_roles = await self.get_all_custom_roles(ctx.guild.id)
+        
+        if not custom_roles:
+            await ctx.send("No custom roles have been set up yet.")
+            return
+        
+        embed = discord.Embed(
+            title="Custom Role Mappings",
+            description="Here are all the custom role mappings:",
+            color=discord.Color.blue()
+        )
+        
+        for custom_name, roles in custom_roles.items():
+            role_mentions = []
+            for role_data in roles:
+                role = ctx.guild.get_role(role_data["role_id"])
+                if role:
+                    role_mentions.append(f"{role.mention} (ID: {role.id})")
+                else:
+                    role_mentions.append(f"Unknown Role (ID: {role_data['role_id']})")
+            
+            if role_mentions:
+                embed.add_field(
+                    name=f"`.{custom_name}`",
+                    value=", ".join(role_mentions),
+                    inline=False
+                )
+        
+        await ctx.send(embed=embed)
+    
+    @commands.command(name="roledesc")
+    async def show_role_description(self, ctx, custom_name: str):
+        """Show description for a custom role
+        
+        Displays the description for a custom role if one was provided.
+        
+        Usage: .roledesc <custom_name>
+        Example: .roledesc staff
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute(
+                'SELECT role_id, description FROM custom_roles WHERE guild_id = ? AND custom_name = ?',
+                (ctx.guild.id, custom_name.lower())
+            ) as cursor:
+                roles = await cursor.fetchall()
+        
+        if not roles:
+            await ctx.send(f"No custom role with the name '{custom_name}' exists.")
+            return
+        
+        embed = discord.Embed(
+            title=f"Role Description: {custom_name}",
+            color=discord.Color.blue()
+        )
+        
+        for role_id, description in roles:
+            role = ctx.guild.get_role(role_id)
+            if role:
+                embed.add_field(
+                    name=role.name,
+                    value=description or "No description provided",
+                    inline=False
+                )
+        
+        await ctx.send(embed=embed)
+    
+    @commands.command(name="clearroles")
+    @commands.has_permissions(administrator=True)
+    async def clear_all_custom_roles(self, ctx, user: discord.Member):
+        """Remove all custom roles from a user
+        
+        Removes all roles that have been mapped with custom names from the user.
+        
+        Usage: .clearroles @user
+        Example: .clearroles @Username
+        """
+        custom_roles = await self.get_all_custom_roles(ctx.guild.id)
+        removed_roles = []
+        
+        for custom_name, roles_data in custom_roles.items():
+            for role_data in roles_data:
+                role = ctx.guild.get_role(role_data["role_id"])
+                if role and role in user.roles:
+                    await user.remove_roles(role)
+                    removed_roles.append(role)
+        
+        if removed_roles:
+            await ctx.send(f"Removed {len(removed_roles)} custom roles from {user.mention}.")
+            await self.log_role_change(ctx.guild, user, removed_roles, "Removed", ctx.author)
+        else:
+            await ctx.send(f"{user.mention} doesn't have any custom roles.")
+    
+    @commands.command(name="setupmultirole")
+    @commands.has_permissions(administrator=True)
+    async def setup_multi_role(self, ctx, custom_name: str, *roles: discord.Role):
+        """Map multiple roles to a custom name at once
+        
+        Creates a command with the custom name that adds/removes multiple roles.
+        
+        Usage: .setupmultirole <custom_name> @role1 @role2...
+        Example: .setupmultirole staff @Moderator @Helper
         """
         if not roles:
-            await ctx.send(
-                embed=discord.Embed(
-                    description=(
-                        f"{EMOJI_INFO} | You must mention at least one role to map to '{custom_name}'."
-                    ),
-                    color=EMBED_COLOR
-                )
-            )
+            await ctx.send("You must specify at least one role.")
             return
-
-        config = await self.load_guild_config(ctx.guild.id)
-        sanitized_name = self.sanitize_role_name(custom_name)
-        if not sanitized_name:
-            await ctx.send(
-                embed=discord.Embed(
-                    description=(
-                        f"{EMOJI_INFO} | Custom name must contain at least one alphanumeric character."
-                    ),
-                    color=EMBED_COLOR
+        
+        async with aiosqlite.connect(self.db_path) as db:
+            # First remove existing mappings
+            await db.execute(
+                'DELETE FROM custom_roles WHERE guild_id = ? AND custom_name = ?',
+                (ctx.guild.id, custom_name.lower())
+            )
+            
+            # Add new mappings
+            for role in roles:
+                await db.execute(
+                    'INSERT INTO custom_roles (guild_id, custom_name, role_id) VALUES (?, ?, ?)',
+                    (ctx.guild.id, custom_name.lower(), role.id)
                 )
-            )
-            return
-
-        built_in_commands = {cmd.name for cmd in self.bot.commands}
-        if sanitized_name in built_in_commands:
-            await ctx.send(
-                embed=discord.Embed(
-                    description=(
-                        f"{EMOJI_INFO} | '{sanitized_name}' conflicts with a built-in command. "
-                        f"Please choose a different name."
-                    ),
-                    color=EMBED_COLOR
-                )
-            )
-            return
-
-        role_id_list = [role.id for role in roles]
-        role_mappings = config.role_mappings.copy()
-        role_mappings[sanitized_name] = role_id_list
-
-        new_config = RoleManagementConfig(
-            guild_id=config.guild_id,
-            reqrole_id=config.reqrole_id,
-            role_mappings=role_mappings,
-            log_channel_id=config.log_channel_id,
-            role_assignment_limit=config.role_assignment_limit
-        )
-        await self.save_guild_config(new_config)
-
-        role_names = ", ".join(r.name for r in roles)
-        await ctx.send(
-            embed=discord.Embed(
-                description=(
-                    f"{EMOJI_SUCCESS} | Mapped '{sanitized_name}' to roles: {role_names}."
-                ),
-                color=EMBED_COLOR
-            )
-        )
-
-    @commands.command()
-    @commands.has_permissions(administrator=True)
-    async def delrole(self, ctx, custom_name: str):
-        """
-        /delrole <custom_name>
+            
+            await db.commit()
+        
+        role_mentions = ", ".join(role.mention for role in roles)
+        await ctx.send(f"Custom role '{custom_name}' has been mapped to: {role_mentions}")
     
-        Deletes the mapping for this custom_name from the current server.
-        All roles under that name are unmapped, and the dynamic command is removed.
-        """
-        config = await self.load_guild_config(ctx.guild.id)
-        sanitized_name = self.sanitize_role_name(custom_name)
-
-        # If the sanitized name isn't in the mapping, inform
-        if sanitized_name not in config.role_mappings:
-            await ctx.send(
-                embed=discord.Embed(
-                    description=(
-                        f"{EMOJI_INFO} | No mapping found for '{sanitized_name}'."
-                    ),
-                    color=EMBED_COLOR
-                )
-            )
+    @commands.Cog.listener()
+    async def on_message(self, message):
+        # Skip messages from bots and non-command messages
+        if message.author.bot or not message.content.startswith('.'):
             return
-
-        # Remove that single key
-        role_mappings = config.role_mappings.copy()
-        del role_mappings[sanitized_name]
-
-        new_config = RoleManagementConfig(
-            guild_id=config.guild_id,
-            reqrole_id=config.reqrole_id,
-            role_mappings=role_mappings,
-            log_channel_id=config.log_channel_id,
-            role_assignment_limit=config.role_assignment_limit
-        )
-        await self.save_guild_config(new_config)
-
-        await ctx.send(
-            embed=discord.Embed(
-                description=(
-                    f"{EMOJI_SUCCESS} | Deleted mapping for '{sanitized_name}'."
-                ),
-                color=EMBED_COLOR
-            )
-        )
-
-    @commands.command()
-    @commands.has_permissions(administrator=True)
-    async def resetroles(self, ctx):
-        """
-        /resetroles
-    
-        Deletes _all_ role mappings in the current server. After this, no dynamic commands exist
-        until you run /setrole again.
-        """
-        config = await self.load_guild_config(ctx.guild.id)
-
-        if not config.role_mappings:
-            await ctx.send(
-                embed=discord.Embed(
-                    description=(
-                        f"{EMOJI_INFO} | There are no role mappings to reset."
-                    ),
-                    color=EMBED_COLOR
-                )
-            )
+            
+        # Check if this might be a custom role command
+        ctx = await self.bot.get_context(message)
+        if ctx.command is not None or not hasattr(ctx, 'guild') or ctx.guild is None:
             return
+            
+        # Extract the command name without the prefix
+        cmd = message.content.split()[0][1:].lower()
+        
+        # Check if the command exists as a custom role
+        custom_roles = await self.get_custom_roles(ctx.guild.id, cmd)
+        
+        if custom_roles and len(message.mentions) == 1:
+            # This is a custom role command
+            # Check if user has admin or required role
+            has_permission = False
+            if ctx.author.guild_permissions.administrator:
+                has_permission = True
+            else:
+                reqrole_id = await self.get_reqrole(ctx.guild.id)
+                if reqrole_id:
+                    reqrole = ctx.guild.get_role(reqrole_id)
+                    if reqrole and reqrole in ctx.author.roles:
+                        has_permission = True
+            
+            if not has_permission:
+                # Get the reqrole name for better error message
+                reqrole_id = await self.get_reqrole(ctx.guild.id)
+                if reqrole_id:
+                    reqrole = ctx.guild.get_role(reqrole_id)
+                    role_name = reqrole.name if reqrole else "the required role"
+                    await ctx.send(f"You need {role_name} to use this command.")
+                else:
+                    await ctx.send("You don't have permission to use this command.")
+                return
+            
+            target_user = message.mentions[0]
+            roles_to_toggle = []
+            
+            for role_id in custom_roles:
+                role = ctx.guild.get_role(role_id)
+                if role:
+                    roles_to_toggle.append(role)
+            
+            if not roles_to_toggle:
+                await ctx.send(f"No valid roles found for '{cmd}'.")
+                return
+            
+            # Check if user has any of the roles
+            has_any_role = any(role in target_user.roles for role in roles_to_toggle)
+            
+            if has_any_role:
+                # Remove roles
+                await target_user.remove_roles(*roles_to_toggle)
+                await ctx.send(f"Removed {', '.join(role.name for role in roles_to_toggle)} from {target_user.mention}.")
+                await self.log_role_change(ctx.guild, target_user, roles_to_toggle, "Removed", ctx.author)
+            else:
+                # Add roles
+                await target_user.add_roles(*roles_to_toggle)
+                await ctx.send(f"Added {', '.join(role.name for role in roles_to_toggle)} to {target_user.mention}.")
+                await self.log_role_change(ctx.guild, target_user, roles_to_toggle, "Added", ctx.author)
 
-        # Wipe every key
-        new_config = RoleManagementConfig(
-            guild_id=config.guild_id,
-            reqrole_id=config.reqrole_id,
-            role_mappings={},  # empty dict = no mappings
-            log_channel_id=config.log_channel_id,
-            role_assignment_limit=config.role_assignment_limit
-        )
-        await self.save_guild_config(new_config)
-
-        await ctx.send(
-            embed=discord.Embed(
-                description=(
-                    f"{EMOJI_SUCCESS} | All mapped roles have been cleared in this server."
-                ),
-                color=EMBED_COLOR
-            )
-        )
-
-    @commands.command()
-    @commands.has_permissions(administrator=True)
-    async def setlogchannel(self, ctx, channel: discord.TextChannel):
-        """
-        /setlogchannel #channel
-        Designates which text channel will receive role‐change logs.
-        """
-        config = await self.load_guild_config(ctx.guild.id)
-        new_config = RoleManagementConfig(
-            guild_id=config.guild_id,
-            reqrole_id=config.reqrole_id,
-            role_mappings=config.role_mappings,
-            log_channel_id=channel.id,
-            role_assignment_limit=config.role_assignment_limit
-        )
-        await self.save_guild_config(new_config)
-        await ctx.send(
-            embed=discord.Embed(
-                description=(
-                    f"{EMOJI_SUCCESS} | Log channel set to **{channel.name}**."
-                ),
-                color=EMBED_COLOR
-            )
-        )
-
-    @commands.command()
-    @commands.has_permissions(administrator=True)
-    async def setrolelimit(self, ctx, limit: int):
-        """
-        /setrolelimit <n>
-        Adjusts how many “mapped” roles a single member may have at once.
-        """
-        if limit < MIN_ROLE_LIMIT or limit > MAX_ROLE_LIMIT:
-            await ctx.send(
-                embed=discord.Embed(
-                    description=(
-                        f"{EMOJI_INFO} | Role limit must be between {MIN_ROLE_LIMIT} and {MAX_ROLE_LIMIT}."
-                    ),
-                    color=EMBED_COLOR
-                )
-            )
-            return
-
-        config = await self.load_guild_config(ctx.guild.id)
-        new_config = RoleManagementConfig(
-            guild_id=config.guild_id,
-            reqrole_id=config.reqrole_id,
-            role_mappings=config.role_mappings,
-            log_channel_id=config.log_channel_id,
-            role_assignment_limit=limit
-        )
-        await self.save_guild_config(new_config)
-        await ctx.send(
-            embed=discord.Embed(
-                description=(
-                    f"{EMOJI_SUCCESS} | Role assignment limit set to {limit}."
-                ),
-                color=EMBED_COLOR
-            )
-        )
-
+    @commands.Cog.listener()
+    async def on_command_error(self, ctx, error):
+        if isinstance(error, commands.CommandNotFound):
+            # The on_message event will handle custom role commands
+            pass
 
 async def setup(bot):
-    # Create the cog instance
-    cog = RoleManagement(bot)
-    
-    # Initialize database and load configs before adding the cog
-    await cog.initialize_database()
-    await cog.initial_config_load()
-    
-    # Add the cog to the bot
-    await bot.add_cog(cog)
-    
-    # Start the periodic cleanup as a background task
-    # Use bot.loop directly since we're in an async context
-    bot.loop.create_task(cog.periodic_config_cleanup())
+    await bot.add_cog(RoleManager(bot))
