@@ -30,7 +30,7 @@ class ConnectionManager:
         self.connection_attempts = defaultdict(int)
         self.last_attempt = defaultdict(float)
         self._connection_locks = defaultdict(asyncio.Lock)
-        self._voice_state_locks = defaultdict(asyncio.Lock)  # Add lock for voice state changes
+        self._voice_state_locks = defaultdict(asyncio.Lock)
 
     async def attempt_connection(self, guild_id: str, channel: discord.VoiceChannel) -> bool:
         """Attempt to connect to a voice channel with rate limiting."""
@@ -66,60 +66,55 @@ class ConnectionManager:
                         await channel.guild.voice_client.disconnect(force=True)
                         await asyncio.sleep(1)
                 
+                # Clean up any existing voice connections first
                 try:
-                    # Clean up any existing voice connections first
-                    try:
-                        if channel.guild.voice_client:
-                            await channel.guild.voice_client.disconnect(force=True)
-                            logger.info(f"Disconnected from previous voice in guild {guild_id}")
-                        await asyncio.sleep(5)  # Wait longer after disconnect
-                    except Exception as e:
-                        logger.error(f"Error during cleanup: {str(e)}")
-                        await asyncio.sleep(5)  # Wait anyway if cleanup fails
-
-                    # Try multiple connection attempts with increasing delays
-                    for attempt in range(3):
-                        try:
-                            # Reset voice state before attempting connection
-                            await channel.guild.change_voice_state(channel=None)
-                            await asyncio.sleep(2)
-
-                            logger.info(f"Attempting connection {attempt + 1}/3 to channel {channel.id}")
-                            voice_client = await channel.connect(
-                                timeout=45.0,  # Longer timeout
-                                self_mute=True,
-                                self_deaf=True,
-                                reconnect=True
-                            )
-                            
-                            # Wait and verify connection
-                            await asyncio.sleep(3)
-                            if voice_client and voice_client.is_connected():
-                                voice_client.self_mute = True
-                                voice_client.self_deaf = True
-                                self.connection_attempts[guild_id] = 0
-                                logger.info(f"Successfully connected and verified connection to channel {channel.id}")
-                                return True
-                            
-                        except Exception as e:
-                            logger.error(f"Connection attempt {attempt + 1} failed: {str(e)}")
-                            # Cleanup after failed attempt
-                            try:
-                                await channel.guild.change_voice_state(channel=None)
-                            except:
-                                pass
-                            
-                            if attempt < 2:
-                                delay = 5 * (attempt + 1)  # 5s, 10s between attempts
-                                logger.info(f"Waiting {delay}s before next attempt")
-                                await asyncio.sleep(delay)
-                            
-                    logger.warning(f"All connection attempts failed for channel {channel.id}")
-                    return False
-                    
+                    if channel.guild.voice_client:
+                        await channel.guild.voice_client.disconnect(force=True)
+                        logger.info(f"Disconnected from previous voice in guild {guild_id}")
+                    await asyncio.sleep(5)  # Wait longer after disconnect
                 except Exception as e:
-                    logger.error(f"Fatal connection error for channel {channel.id} in guild {guild_id}: {str(e)}")
-                    return False
+                    logger.error(f"Error during cleanup: {str(e)}")
+                    await asyncio.sleep(5)  # Wait anyway if cleanup fails
+
+                # Try multiple connection attempts with increasing delays
+                for attempt in range(3):
+                    try:
+                        # Reset voice state before attempting connection
+                        await channel.guild.change_voice_state(channel=None)
+                        await asyncio.sleep(2)
+
+                        logger.info(f"Attempting connection {attempt + 1}/3 to channel {channel.id}")
+                        voice_client = await channel.connect(
+                            timeout=45.0,  # Longer timeout
+                            self_mute=True,
+                            self_deaf=True,
+                            reconnect=True
+                        )
+                        
+                        # Wait and verify connection
+                        await asyncio.sleep(3)
+                        if voice_client and voice_client.is_connected():
+                            voice_client.self_mute = True
+                            voice_client.self_deaf = True
+                            self.connection_attempts[guild_id] = 0
+                            logger.info(f"Successfully connected and verified connection to channel {channel.id}")
+                            return True
+                        
+                    except Exception as e:
+                        logger.error(f"Connection attempt {attempt + 1} failed: {str(e)}")
+                        # Cleanup after failed attempt
+                        try:
+                            await channel.guild.change_voice_state(channel=None)
+                        except:
+                            pass
+                        
+                        if attempt < 2:
+                            delay = 5 * (attempt + 1)  # 5s, 10s between attempts
+                            logger.info(f"Waiting {delay}s before next attempt")
+                            await asyncio.sleep(delay)
+                        
+                logger.warning(f"All connection attempts failed for channel {channel.id}")
+                return False
                 
             except asyncio.TimeoutError:
                 logger.error(f"Connection attempt timed out for guild {guild_id}")
@@ -129,6 +124,17 @@ class ConnectionManager:
                 logger.error(f"Error connecting to channel {channel.id} in guild {guild_id}: {str(e)}")
                 self.connection_attempts[guild_id] += 1
                 return False
+
+    def cleanup_old_data(self):
+        """Clean up old connection attempt data to prevent memory leaks."""
+        current_time = time.time()
+        # Remove entries older than 1 hour
+        for guild_id in list(self.last_attempt.keys()):
+            if current_time - self.last_attempt[guild_id] > 3600:
+                del self.last_attempt[guild_id]
+                if guild_id in self.connection_attempts:
+                    del self.connection_attempts[guild_id]
+                logger.debug(f"Cleaned up old data for guild {guild_id}")
 
 class AlwaysVC(commands.Cog):
     def __init__(self, bot):
@@ -140,7 +146,6 @@ class AlwaysVC(commands.Cog):
         self.load_data()
         self._guild_locks = defaultdict(asyncio.Lock)
         self._rejoin_cooldown = defaultdict(float)
-        self._ready = False
         
         # Start health check when bot is ready
         self.bot.loop.create_task(self._start_health_check())
@@ -150,6 +155,20 @@ class AlwaysVC(commands.Cog):
         if not self.health_check.is_running():
             self.health_check.start()
             logger.info("Started voice channel health check")
+        if not self.cleanup_task.is_running():
+            self.cleanup_task.start()
+            logger.info("Started cleanup task")
+
+    def validate_config(self, config):
+        """Validate configuration parameters."""
+        if 'join_delay' in config:
+            if not isinstance(config['join_delay'], int) or not (0 <= config['join_delay'] <= 300):
+                config['join_delay'] = 5
+        if 'auto_rejoin' not in config:
+            config['auto_rejoin'] = True
+        if 'mute_on_join' not in config:
+            config['mute_on_join'] = True
+        return config
 
     def load_data(self):
         """Load guild configurations from file."""
@@ -162,6 +181,9 @@ class AlwaysVC(commands.Cog):
                 with open(self.db_file, 'r', encoding='utf-8') as f:
                     data = json.load(f)
                     self.guild_configs = data.get('guild_configs', {})
+                    # Validate all loaded configs
+                    for guild_id in self.guild_configs:
+                        self.guild_configs[guild_id] = self.validate_config(self.guild_configs[guild_id])
                 logger.info(f"Loaded configurations for {len(self.guild_configs)} guilds")
             else:
                 self.guild_configs = {}
@@ -178,7 +200,7 @@ class AlwaysVC(commands.Cog):
             if os.path.isfile(self.db_file):
                 backup_path = f"{self.db_file}.backup"
                 os.replace(self.db_file, backup_path)
-                logger.info(f"Created backup at {backup_path}")
+                logger.debug(f"Created backup at {backup_path}")
             
             # Write new data
             with open(self.db_file, 'w', encoding='utf-8') as f:
@@ -192,6 +214,17 @@ class AlwaysVC(commands.Cog):
             if os.path.isfile(backup_path):
                 os.replace(backup_path, self.db_file)
                 logger.info("Restored backup file after save error")
+
+    async def _apply_mute_settings(self, guild, config):
+        """Helper method to apply mute settings."""
+        if config.get('mute_on_join', False) and guild.voice_client:
+            await asyncio.sleep(1)
+            try:
+                guild.voice_client.self_mute = True
+                guild.voice_client.self_deaf = True
+                logger.info(f"Applied mute settings in guild {guild.id}")
+            except Exception as e:
+                logger.error(f"Failed to apply mute settings in guild {guild.id}: {e}")
 
     async def join_vc(self, guild, attempt=1):
         """Join a voice channel in the specified guild."""
@@ -250,11 +283,7 @@ class AlwaysVC(commands.Cog):
                 connected = await self.connection_manager.attempt_connection(guild_id, vc_channel)
                 if connected:
                     logger.info(f"Successfully connected to channel {vc_channel_id} in guild {guild_id}")
-                    if config.get('mute_on_join', False):
-                        await asyncio.sleep(1)  # Wait for connection to stabilize
-                        guild.voice_client.self_mute = True
-                        guild.voice_client.self_deaf = True
-                        logger.info(f"Applied self mute and deafen state in guild {guild_id}")
+                    await self._apply_mute_settings(guild, config)
                 else:
                     logger.warning(f"Failed to connect to channel {vc_channel_id} in guild {guild_id}")
                     if attempt < max_attempts:
@@ -274,25 +303,6 @@ class AlwaysVC(commands.Cog):
                 await self.join_vc(guild, attempt + 1)
         except Exception as e:
             logger.error(f"Unexpected error in guild {guild_id}: {str(e)}")
-
-            try:
-                connected = await self.connection_manager.attempt_connection(guild_id, vc_channel)
-                if connected:
-                    if config.get('mute_on_join', False):
-                        await asyncio.sleep(1)  # Wait for connection to stabilize
-                        if guild.voice_client:
-                            try:
-                                guild.voice_client.self_mute = True
-                                guild.voice_client.self_deaf = True
-                            except Exception as mute_error:
-                                print(f"Failed to self-mute/deafen in guild {guild.name}: {mute_error}")
-            except Exception as e:
-                print(f"Error connecting to VC on guild {guild.name} attempt {attempt}: {e}")
-                max_attempts = 5
-                if attempt < max_attempts:
-                    delay = (2 ** attempt)
-                    await asyncio.sleep(delay)
-                    await self.join_vc(guild, attempt + 1)
 
     @commands.Cog.listener()
     async def on_ready(self):
@@ -386,11 +396,29 @@ class AlwaysVC(commands.Cog):
         except Exception as e:
             logger.error(f"Error in health check: {str(e)}")
 
+    @tasks.loop(hours=1)
+    async def cleanup_task(self):
+        """Clean up old data to prevent memory leaks."""
+        try:
+            self.connection_manager.cleanup_old_data()
+            logger.debug("Completed cleanup task")
+        except Exception as e:
+            logger.error(f"Error in cleanup task: {str(e)}")
+
+    async def create_backup(self):
+        """Create a timestamped backup of the configuration."""
+        timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+        backup_file = os.path.join(self.db_folder, f'backup_{timestamp}.json')
+        with open(backup_file, 'w') as f:
+            json.dump(self.guild_configs, f, indent=2)
+        return backup_file
+
     async def cog_unload(self):
         """Cleanup when cog is unloaded."""
         try:
             # Cancel health check task
             self.health_check.cancel()
+            self.cleanup_task.cancel()
             
             # Disconnect from all voice channels
             for guild in self.bot.guilds:
@@ -416,186 +444,205 @@ class AlwaysVC(commands.Cog):
             logger.error(f"Error during cog load: {str(e)}")
             raise
 
-    # CORRECTED SLASH COMMANDS - Use app_commands instead
-    @app_commands.command(name='always-vc', description='Setup or stop the bot staying in a VC')
-    @app_commands.describe(channel="Voice channel to always stay in")
-    @app_commands.default_permissions(administrator=True)
-    async def always_vc(self, interaction: discord.Interaction, channel: discord.VoiceChannel):
-        await interaction.response.defer()
-        
-        try:
-            guild_id = str(interaction.guild.id)
-            config = self.guild_configs.get(guild_id, {})
-            current_channel_id = config.get('vc_channel_id')
-            
-            logger.info(f"Always-VC command received for channel {channel.name} ({channel.id}) in guild {interaction.guild.name}")
-
-            # Verify permissions first
-            permissions = channel.permissions_for(interaction.guild.me)
-            if not permissions.connect or not permissions.speak:
-                await interaction.followup.send(f"❌ I don't have permission to join **{channel.name}**!")
-                logger.error(f"Missing permissions for channel {channel.id} in guild {guild_id}")
-                return
-
-            # If we're already set to this channel, stop staying in it
-            if current_channel_id == channel.id:
-                config['vc_channel_id'] = None
-                config['auto_rejoin'] = False  # Disable auto-rejoin when stopping
-                self.guild_configs[guild_id] = config
-                self.save_data()
-                logger.info(f"Stopping always-VC in channel {channel.name} ({channel.id})")
-                
-                # Disconnect if connected
-                if interaction.guild.voice_client:
-                    await interaction.guild.voice_client.disconnect(force=True)
-                
-                await interaction.followup.send(f"✅ Stopped staying in VC **{channel.name}**.")
-                return
-
-            # Set up new channel configuration
-            config['vc_channel_id'] = channel.id
-            config['auto_rejoin'] = True  # Enable auto-rejoin for new channel
-            config.setdefault('mute_on_join', True)  # Default to muted
-            config.setdefault('join_delay', 5)
-            self.guild_configs[guild_id] = config
-            self.save_data()
-            logger.info(f"Configured always-VC for channel {channel.name} ({channel.id})")
-            
-            # Disconnect from current channel if in a different one
-            if interaction.guild.voice_client:
-                logger.info(f"Disconnecting from current channel in {interaction.guild.name}")
-                await interaction.guild.voice_client.disconnect(force=True)
-                await asyncio.sleep(2)  # Wait a bit before reconnecting
-            
-            # Try to connect to new channel
-            await interaction.followup.send(f"🔄 Connecting to VC **{channel.name}**...")
-            
-            # Attempt connection with retry logic
-            for attempt in range(3):
-                try:
-                    # Direct connection attempt
-                    voice_client = await channel.connect(timeout=15.0, self_mute=True, self_deaf=True, reconnect=True)
-                    if voice_client and voice_client.is_connected():
-                        voice_client.self_mute = True
-                        voice_client.self_deaf = True
-                        logger.info(f"Successfully connected to channel {channel.name} ({channel.id})")
-                        await interaction.followup.send(f"✅ Successfully connected to VC **{channel.name}**!")
-                        return
-                except Exception as e:
-                    logger.error(f"Connection attempt {attempt + 1} failed: {str(e)}")
-                    if attempt < 2:  # Don't wait on last attempt
-                        await asyncio.sleep(2 ** attempt)
-            
-            # If we get here, all connection attempts failed
-            logger.error(f"All connection attempts failed for channel {channel.name} ({channel.id})")
-            await interaction.followup.send(f"⚠️ Failed to connect to VC **{channel.name}**. Will keep trying...")
-            
-        except Exception as e:
-            logger.error(f"Error in always-vc command: {str(e)}")
-            await interaction.followup.send(f"❌ An error occurred: {str(e)}")
-
-    @app_commands.command(name='always-stats', description='Show voice channel statistics')
-    @app_commands.default_permissions(administrator=True)
-    async def vc_stats(self, interaction: discord.Interaction):
-        await interaction.response.defer()  # Defer response immediately
-        
-        try:
-            guild_id = str(interaction.guild.id)
-            config = self.guild_configs.get(guild_id)
-            if not config or not config.get('vc_channel_id'):
-                await interaction.followup.send("❌ No always-vc configured for this server.")
-                return
-                
-            embed = discord.Embed(title="🎤 Voice Channel Statistics", color=0x00ff00)
-            chan_id = config['vc_channel_id']
-            embed.add_field(name="Current Channel", value=f"<#{chan_id}>")
-            embed.add_field(name="Auto-Rejoin", value="✅ Enabled" if config.get('auto_rejoin') else "❌ Disabled")
-            embed.add_field(name="Mute on Join", value="✅ Enabled" if config.get('mute_on_join') else "❌ Disabled")
-            embed.add_field(name="Join Delay", value=f"{config.get('join_delay', 3)}s")
-            await interaction.followup.send(embed=embed)
-        except Exception as e:
-            await interaction.followup.send(f"❌ An error occurred: {str(e)}")
-
-    async def get_join_delay_choices(self, _: discord.Interaction) -> List[app_commands.Choice[str]]:
-        return [
-            app_commands.Choice(name=f"{i} seconds", value=str(i))
-            for i in [1, 2, 3, 5, 10, 15, 30, 60]
-        ]
-
-    @app_commands.command(name='always-config', description='Configure bot settings')
+    # SINGLE SLASH COMMAND WITH SUBCOMMANDS
+    @app_commands.command(name='always-vc', description='Manage always-vc bot settings')
     @app_commands.describe(
-        setting="Setting to change",
-        value="Select the new value"
+        action="What action to perform",
+        channel="Voice channel (for setup action)",
+        setting="Setting to configure",
+        value="Value to set"
     )
     @app_commands.choices(
+        action=[
+            app_commands.Choice(name="🔧 Setup - Set or stop always-vc", value="setup"),
+            app_commands.Choice(name="📊 Stats - View current settings", value="stats"), 
+            app_commands.Choice(name="⚙️ Config - Change settings", value="config"),
+            app_commands.Choice(name="💾 Backup - Create config backup", value="backup")
+        ],
         setting=[
-            app_commands.Choice(name="🔄 Auto Rejoin (Bot rejoins if disconnected)", value="auto_rejoin"),
-            app_commands.Choice(name="⏲️ Join Delay (Seconds to wait before joining)", value="join_delay"),
-            app_commands.Choice(name="🔇 Mute on Join (Bot joins muted)", value="mute_on_join")
+            app_commands.Choice(name="🔄 Auto Rejoin", value="auto_rejoin"),
+            app_commands.Choice(name="⏲️ Join Delay (seconds)", value="join_delay"),
+            app_commands.Choice(name="🔇 Mute on Join", value="mute_on_join")
         ],
         value=[
-            app_commands.Choice(name="✅ Enabled", value="true"),
-            app_commands.Choice(name="❌ Disabled", value="false")
+            app_commands.Choice(name="✅ Enabled/True", value="true"),
+            app_commands.Choice(name="❌ Disabled/False", value="false"),
+            app_commands.Choice(name="1 second", value="1"),
+            app_commands.Choice(name="3 seconds", value="3"),
+            app_commands.Choice(name="5 seconds", value="5"),
+            app_commands.Choice(name="10 seconds", value="10"),
+            app_commands.Choice(name="15 seconds", value="15"),
+            app_commands.Choice(name="30 seconds", value="30")
         ]
     )
     @app_commands.default_permissions(administrator=True)
-    async def vc_config(self, interaction: discord.Interaction, setting: app_commands.Choice[str], value: app_commands.Choice[str]):
-        await interaction.response.defer()  # Defer response immediately
-        
+    async def alwaysvc_command(
+        self, 
+        interaction: discord.Interaction, 
+        action: app_commands.Choice[str],
+        channel: Optional[discord.VoiceChannel] = None,
+        setting: Optional[app_commands.Choice[str]] = None,
+        value: Optional[app_commands.Choice[str]] = None
+    ):
         try:
-            guild_id = str(interaction.guild.id)
-            setting = setting.value
-            value_str = value.value
+            await interaction.response.defer()
             
-            # Get or create config for this guild
-            config = self.guild_configs.get(guild_id, {})
-            
-            if setting in ['auto_rejoin', 'mute_on_join']:
-                config[setting] = value_str == 'true'  # Compare directly with string
-            elif setting == 'join_delay':
-                if not value_str.isdigit() or not (1 <= int(value_str) <= 60):
-                    await interaction.followup.send("❌ Join Delay must be a number between 1 and 60 seconds")
-                    return
-                config[setting] = int(value_str)
-            
-            self.guild_configs[guild_id] = config
-            self.save_data()
-            
-            # Format the value for display
-            display_value = "✅ Enabled" if config[setting] == True else "❌ Disabled"
-            if setting == 'join_delay':
-                display_value = f"{config[setting]} seconds"
+            if action.value == "setup":
+                await self._handle_setup(interaction, channel)
+            elif action.value == "stats":
+                await self._handle_stats(interaction)
+            elif action.value == "config":
+                await self._handle_config(interaction, setting, value)
+            elif action.value == "backup":
+                await self._handle_backup(interaction)
                 
-            await interaction.followup.send(f"✅ Updated **{setting}** to {display_value}")
-            
+        except discord.errors.NotFound:
+            # Interaction already responded to
+            pass
         except Exception as e:
-            await interaction.followup.send(f"❌ An error occurred: {str(e)}")
+            logger.error(f"Error in alwaysvc command: {str(e)}")
+            try:
+                if not interaction.response.is_done():
+                    await interaction.response.send_message(f"❌ An error occurred: {str(e)}", ephemeral=True)
+                else:
+                    await interaction.followup.send(f"❌ An error occurred: {str(e)}", ephemeral=True)
+            except:
+                pass
+
+    async def _handle_setup(self, interaction: discord.Interaction, channel: Optional[discord.VoiceChannel]):
+        """Handle setup action."""
+        if not channel:
+            await interaction.followup.send("❌ Please specify a voice channel for setup!", ephemeral=True)
+            return
             
+        guild_id = str(interaction.guild.id)
         config = self.guild_configs.get(guild_id, {})
-        if setting in ['auto_rejoin', 'mute_on_join']:
-            config[setting] = value.lower() == 'true'
-        else:
-            config[setting] = int(value)
-            
-        self.guild_configs[guild_id] = config
-        self.save_data()
-        await interaction.response.send_message(f"✅ Updated {setting} to {value}")
-
-    async def create_backup(self):
-        timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
-        backup_file = os.path.join(self.db_folder, f'backup_{timestamp}.json')
-        with open(backup_file, 'w') as f:
-            json.dump(self.guild_configs, f, indent=2)
-
-    @app_commands.command(name='vc-backup', description='Create configuration backup')
-    @app_commands.default_permissions(administrator=True)
-    async def backup_config(self, interaction: discord.Interaction):
-        await interaction.response.defer()  # Defer response immediately
+        current_channel_id = config.get('vc_channel_id')
         
+        logger.info(f"Always-VC setup command received for channel {channel.name} ({channel.id}) in guild {interaction.guild.name}")
+
+        # Verify permissions first
+        permissions = channel.permissions_for(interaction.guild.me)
+        if not permissions.connect or not permissions.speak:
+            await interaction.followup.send(f"❌ I don't have permission to join **{channel.name}**!")
+            logger.error(f"Missing permissions for channel {channel.id} in guild {guild_id}")
+            return
+
+        # If we're already set to this channel, stop staying in it
+        if current_channel_id == channel.id:
+            config['vc_channel_id'] = None
+            config['auto_rejoin'] = False  # Disable auto-rejoin when stopping
+            self.guild_configs[guild_id] = self.validate_config(config)
+            self.save_data()
+            logger.info(f"Stopping always-VC in channel {channel.name} ({channel.id})")
+            
+            # Disconnect if connected
+            if interaction.guild.voice_client:
+                await interaction.guild.voice_client.disconnect(force=True)
+            
+            await interaction.followup.send(f"✅ Stopped staying in VC **{channel.name}**.")
+            return
+
+        # Set up new channel configuration
+        config['vc_channel_id'] = channel.id
+        config['auto_rejoin'] = True  # Enable auto-rejoin for new channel
+        config.setdefault('mute_on_join', True)  # Default to muted
+        config.setdefault('join_delay', 5)
+        self.guild_configs[guild_id] = self.validate_config(config)
+        self.save_data()
+        logger.info(f"Configured always-VC for channel {channel.name} ({channel.id})")
+        
+        # Disconnect from current channel if in a different one
+        if interaction.guild.voice_client:
+            logger.info(f"Disconnecting from current channel in {interaction.guild.name}")
+            await interaction.guild.voice_client.disconnect(force=True)
+            await asyncio.sleep(2)  # Wait a bit before reconnecting
+        
+        # Try to connect to new channel
+        await interaction.followup.send(f"🔄 Connecting to VC **{channel.name}**...")
+        
+        # Attempt connection with retry logic
+        for attempt in range(3):
+            try:
+                # Direct connection attempt
+                voice_client = await channel.connect(timeout=15.0, self_mute=True, self_deaf=True, reconnect=True)
+                if voice_client and voice_client.is_connected():
+                    voice_client.self_mute = True
+                    voice_client.self_deaf = True
+                    logger.info(f"Successfully connected to channel {channel.name} ({channel.id})")
+                    await interaction.followup.send(f"✅ Successfully connected to VC **{channel.name}**!")
+                    return
+            except Exception as e:
+                logger.error(f"Connection attempt {attempt + 1} failed: {str(e)}")
+                if attempt < 2:  # Don't wait on last attempt
+                    await asyncio.sleep(2 ** attempt)
+        
+        # If we get here, all connection attempts failed
+        logger.error(f"All connection attempts failed for channel {channel.name} ({channel.id})")
+        await interaction.followup.send(f"⚠️ Failed to connect to VC **{channel.name}**. Will keep trying...")
+
+    async def _handle_stats(self, interaction: discord.Interaction):
+        """Handle stats action."""
+        guild_id = str(interaction.guild.id)
+        config = self.guild_configs.get(guild_id)
+        if not config or not config.get('vc_channel_id'):
+            await interaction.followup.send("❌ No always-vc configured for this server.")
+            return
+            
+        embed = discord.Embed(title="🎤 Voice Channel Statistics", color=0x00ff00)
+        chan_id = config['vc_channel_id']
+        embed.add_field(name="Current Channel", value=f"<#{chan_id}>", inline=False)
+        embed.add_field(name="Auto-Rejoin", value="✅ Enabled" if config.get('auto_rejoin') else "❌ Disabled", inline=True)
+        embed.add_field(name="Mute on Join", value="✅ Enabled" if config.get('mute_on_join') else "❌ Disabled", inline=True)
+        embed.add_field(name="Join Delay", value=f"{config.get('join_delay', 3)}s", inline=True)
+        
+        # Add connection status
+        guild = interaction.guild
+        if guild.voice_client and guild.voice_client.channel.id == chan_id:
+            embed.add_field(name="Status", value="🟢 Connected", inline=True)
+        else:
+            embed.add_field(name="Status", value="🔴 Disconnected", inline=True)
+            
+        await interaction.followup.send(embed=embed)
+
+    async def _handle_config(self, interaction: discord.Interaction, setting: Optional[app_commands.Choice[str]], value: Optional[app_commands.Choice[str]]):
+        """Handle config action."""
+        if not setting or not value:
+            await interaction.followup.send("❌ Please specify both a setting and value for configuration!", ephemeral=True)
+            return
+            
+        guild_id = str(interaction.guild.id)
+        setting_name = setting.value
+        value_str = value.value
+        
+        # Get or create config for this guild
+        config = self.guild_configs.get(guild_id, {})
+        
+        if setting_name in ['auto_rejoin', 'mute_on_join']:
+            config[setting_name] = value_str == 'true'
+        elif setting_name == 'join_delay':
+            if not value_str.isdigit() or not (1 <= int(value_str) <= 60):
+                await interaction.followup.send("❌ Join Delay must be a number between 1 and 60 seconds")
+                return
+            config[setting_name] = int(value_str)
+        
+        self.guild_configs[guild_id] = self.validate_config(config)
+        self.save_data()
+        
+        # Format the value for display
+        display_value = "✅ Enabled" if config[setting_name] == True else "❌ Disabled"
+        if setting_name == 'join_delay':
+            display_value = f"{config[setting_name]} seconds"
+            
+        await interaction.followup.send(f"✅ Updated **{setting_name}** to {display_value}")
+
+    async def _handle_backup(self, interaction: discord.Interaction):
+        """Handle backup action."""
         try:
-            await self.create_backup()
-            await interaction.followup.send("✅ Configuration backup created successfully!")
+            backup_file = await self.create_backup()
+            await interaction.followup.send(f"✅ Configuration backup created: `{os.path.basename(backup_file)}`")
         except Exception as e:
+            logger.error(f"Error creating backup: {str(e)}")
             await interaction.followup.send(f"❌ An error occurred while creating backup: {str(e)}")
 
 async def setup(bot):
