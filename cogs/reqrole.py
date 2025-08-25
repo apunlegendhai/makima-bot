@@ -1,95 +1,76 @@
 import discord
 from discord.ext import commands
-import aiosqlite
+import motor.motor_asyncio
 import os
 import asyncio
 from typing import Dict, List, Optional, Union
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 class RoleManager(commands.Cog, name="Role Management"):
     """Role management system with custom role names and required role for permissions"""
     
     def __init__(self, bot):
         self.bot = bot
-        self.db_folder = "database"
-        self.db_path = os.path.join(self.db_folder, "reqrole.db")
+        self.mongo_url = os.getenv('MONGO_URL')
+        if not self.mongo_url:
+            raise ValueError("MONGO_URL not found in environment variables")
+        
+        self.client = motor.motor_asyncio.AsyncIOMotorClient(self.mongo_url)
+        self.db = self.client.role_manager
         self.bot.loop.create_task(self.setup_database())
         
     async def setup_database(self):
-        """Set up the database and tables if they don't exist"""
-        # Create database directory if it doesn't exist
-        if not os.path.exists(self.db_folder):
-            os.makedirs(self.db_folder)
+        """Set up the database collections if they don't exist"""
+        try:
+            # Test connection
+            await self.client.admin.command('ping')
+            print("Connected to MongoDB Atlas successfully")
             
-        async with aiosqlite.connect(self.db_path) as db:
-            # Create table for required role (reqrole)
-            await db.execute('''
-                CREATE TABLE IF NOT EXISTS reqrole (
-                    guild_id INTEGER PRIMARY KEY,
-                    role_id INTEGER NOT NULL
-                )
-            ''')
+            # Collections will be created automatically when first document is inserted
+            # Create indexes for better performance
+            await self.db.reqrole.create_index("guild_id", unique=True)
+            await self.db.custom_roles.create_index([("guild_id", 1), ("custom_name", 1)])
+            await self.db.log_channels.create_index("guild_id", unique=True)
             
-            # Create table for custom role mappings
-            await db.execute('''
-                CREATE TABLE IF NOT EXISTS custom_roles (
-                    guild_id INTEGER NOT NULL,
-                    custom_name TEXT NOT NULL,
-                    role_id INTEGER NOT NULL,
-                    description TEXT,
-                    PRIMARY KEY (guild_id, custom_name, role_id)
-                )
-            ''')
-            
-            # Create table for log channels
-            await db.execute('''
-                CREATE TABLE IF NOT EXISTS log_channels (
-                    guild_id INTEGER PRIMARY KEY,
-                    channel_id INTEGER NOT NULL
-                )
-            ''')
-            
-            await db.commit()
+        except Exception as e:
+            print(f"Failed to connect to MongoDB: {e}")
+            raise
     
     async def get_reqrole(self, guild_id: int) -> Optional[int]:
         """Get the required role ID for a guild"""
-        async with aiosqlite.connect(self.db_path) as db:
-            async with db.execute('SELECT role_id FROM reqrole WHERE guild_id = ?', (guild_id,)) as cursor:
-                result = await cursor.fetchone()
-                return result[0] if result else None
+        result = await self.db.reqrole.find_one({"guild_id": guild_id})
+        return result["role_id"] if result else None
     
     async def get_custom_roles(self, guild_id: int, custom_name: str) -> List[int]:
         """Get the role IDs mapped to a custom name"""
-        async with aiosqlite.connect(self.db_path) as db:
-            async with db.execute(
-                'SELECT role_id FROM custom_roles WHERE guild_id = ? AND custom_name = ?', 
-                (guild_id, custom_name.lower())
-            ) as cursor:
-                results = await cursor.fetchall()
-                return [result[0] for result in results] if results else []
+        cursor = self.db.custom_roles.find({
+            "guild_id": guild_id,
+            "custom_name": custom_name.lower()
+        })
+        results = await cursor.to_list(length=None)
+        return [result["role_id"] for result in results] if results else []
     
     async def get_log_channel(self, guild_id: int) -> Optional[int]:
         """Get the log channel ID for a guild"""
-        async with aiosqlite.connect(self.db_path) as db:
-            async with db.execute('SELECT channel_id FROM log_channels WHERE guild_id = ?', (guild_id,)) as cursor:
-                result = await cursor.fetchone()
-                return result[0] if result else None
+        result = await self.db.log_channels.find_one({"guild_id": guild_id})
+        return result["channel_id"] if result else None
     
     async def get_all_custom_roles(self, guild_id: int) -> Dict[str, List[Dict[str, Union[int, str]]]]:
         """Get all custom role mappings for a guild"""
         result = {}
-        async with aiosqlite.connect(self.db_path) as db:
-            async with db.execute(
-                'SELECT custom_name, role_id, description FROM custom_roles WHERE guild_id = ?', 
-                (guild_id,)
-            ) as cursor:
-                async for row in cursor:
-                    custom_name, role_id, description = row
-                    if custom_name not in result:
-                        result[custom_name] = []
-                    result[custom_name].append({
-                        "role_id": role_id,
-                        "description": description
-                    })
+        cursor = self.db.custom_roles.find({"guild_id": guild_id})
+        
+        async for doc in cursor:
+            custom_name = doc["custom_name"]
+            if custom_name not in result:
+                result[custom_name] = []
+            result[custom_name].append({
+                "role_id": doc["role_id"],
+                "description": doc.get("description")
+            })
         return result
     
     async def log_role_change(self, guild: discord.Guild, user: discord.Member, 
@@ -183,12 +164,11 @@ class RoleManager(commands.Cog, name="Role Management"):
         Usage: .setupreqrole @role
         Example: .setupreqrole @RoleManager
         """
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute(
-                'INSERT OR REPLACE INTO reqrole (guild_id, role_id) VALUES (?, ?)',
-                (ctx.guild.id, role.id)
-            )
-            await db.commit()
+        await self.db.reqrole.replace_one(
+            {"guild_id": ctx.guild.id},
+            {"guild_id": ctx.guild.id, "role_id": role.id},
+            upsert=True
+        )
         
         await ctx.send(f"Required role for role management has been set to {role.name}.")
     
@@ -203,12 +183,20 @@ class RoleManager(commands.Cog, name="Role Management"):
         Usage: .setrole <custom_name> @role [description]
         Example: .setrole staff @StaffMember Staff members can moderate chat
         """
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute(
-                'INSERT OR REPLACE INTO custom_roles (guild_id, custom_name, role_id, description) VALUES (?, ?, ?, ?)',
-                (ctx.guild.id, custom_name.lower(), role.id, description)
-            )
-            await db.commit()
+        await self.db.custom_roles.replace_one(
+            {
+                "guild_id": ctx.guild.id,
+                "custom_name": custom_name.lower(),
+                "role_id": role.id
+            },
+            {
+                "guild_id": ctx.guild.id,
+                "custom_name": custom_name.lower(),
+                "role_id": role.id,
+                "description": description
+            },
+            upsert=True
+        )
         
         await ctx.send(f"Custom role '{custom_name}' has been mapped to {role.name}.")
     
@@ -223,21 +211,25 @@ class RoleManager(commands.Cog, name="Role Management"):
         Usage: .removerole <custom_name> [@role]
         Example: .removerole staff @StaffMember
         """
-        async with aiosqlite.connect(self.db_path) as db:
-            if role:
-                await db.execute(
-                    'DELETE FROM custom_roles WHERE guild_id = ? AND custom_name = ? AND role_id = ?',
-                    (ctx.guild.id, custom_name.lower(), role.id)
-                )
+        if role:
+            result = await self.db.custom_roles.delete_one({
+                "guild_id": ctx.guild.id,
+                "custom_name": custom_name.lower(),
+                "role_id": role.id
+            })
+            if result.deleted_count > 0:
                 await ctx.send(f"Removed mapping of '{custom_name}' to {role.name}.")
             else:
-                await db.execute(
-                    'DELETE FROM custom_roles WHERE guild_id = ? AND custom_name = ?',
-                    (ctx.guild.id, custom_name.lower())
-                )
-                await ctx.send(f"Removed all mappings for custom role '{custom_name}'.")
-            
-            await db.commit()
+                await ctx.send(f"No mapping found for '{custom_name}' to {role.name}.")
+        else:
+            result = await self.db.custom_roles.delete_many({
+                "guild_id": ctx.guild.id,
+                "custom_name": custom_name.lower()
+            })
+            if result.deleted_count > 0:
+                await ctx.send(f"Removed {result.deleted_count} mapping(s) for custom role '{custom_name}'.")
+            else:
+                await ctx.send(f"No mappings found for custom role '{custom_name}'.")
     
     @commands.command(name="resetserver")
     @commands.has_permissions(administrator=True)
@@ -263,17 +255,9 @@ class RoleManager(commands.Cog, name="Role Management"):
             return
         
         # Delete all server data
-        async with aiosqlite.connect(self.db_path) as db:
-            # Delete reqrole
-            await db.execute('DELETE FROM reqrole WHERE guild_id = ?', (ctx.guild.id,))
-            
-            # Delete custom roles
-            await db.execute('DELETE FROM custom_roles WHERE guild_id = ?', (ctx.guild.id,))
-            
-            # Delete log channel
-            await db.execute('DELETE FROM log_channels WHERE guild_id = ?', (ctx.guild.id,))
-            
-            await db.commit()
+        await self.db.reqrole.delete_one({"guild_id": ctx.guild.id})
+        await self.db.custom_roles.delete_many({"guild_id": ctx.guild.id})
+        await self.db.log_channels.delete_one({"guild_id": ctx.guild.id})
         
         await ctx.send("✅ All role configurations for this server have been reset.")
     
@@ -288,33 +272,31 @@ class RoleManager(commands.Cog, name="Role Management"):
         Usage: .deletemappedrole <role_id>
         Example: .deletemappedrole 123456789012345678
         """
-        async with aiosqlite.connect(self.db_path) as db:
-            # Check if the role exists in any mapping
-            async with db.execute(
-                'SELECT custom_name FROM custom_roles WHERE guild_id = ? AND role_id = ?',
-                (ctx.guild.id, role_id)
-            ) as cursor:
-                mappings = await cursor.fetchall()
-            
-            if not mappings:
-                await ctx.send(f"No mappings found for role ID {role_id}.")
-                return
-            
-            # Delete the role from all mappings
-            await db.execute(
-                'DELETE FROM custom_roles WHERE guild_id = ? AND role_id = ?',
-                (ctx.guild.id, role_id)
-            )
-            await db.commit()
+        # Check if the role exists in any mapping
+        cursor = self.db.custom_roles.find({
+            "guild_id": ctx.guild.id,
+            "role_id": role_id
+        })
+        mappings = await cursor.to_list(length=None)
+        
+        if not mappings:
+            await ctx.send(f"No mappings found for role ID {role_id}.")
+            return
+        
+        # Delete the role from all mappings
+        result = await self.db.custom_roles.delete_many({
+            "guild_id": ctx.guild.id,
+            "role_id": role_id
+        })
         
         # Get the role object if it exists
         role = ctx.guild.get_role(role_id)
         role_name = role.name if role else f"ID:{role_id}"
         
         # Format the custom names
-        custom_names = [f"`.{mapping[0]}`" for mapping in mappings]
+        custom_names = [f"`.{mapping['custom_name']}`" for mapping in mappings]
         
-        await ctx.send(f"✅ Deleted role {role_name} from the following mappings: {', '.join(custom_names)}")
+        await ctx.send(f"✅ Deleted role {role_name} from {result.deleted_count} mapping(s): {', '.join(custom_names)}")
     
     @commands.command(name="setlogchannel")
     @commands.has_permissions(administrator=True)
@@ -326,12 +308,11 @@ class RoleManager(commands.Cog, name="Role Management"):
         Usage: .setlogchannel #channel
         Example: .setlogchannel #role-logs
         """
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute(
-                'INSERT OR REPLACE INTO log_channels (guild_id, channel_id) VALUES (?, ?)',
-                (ctx.guild.id, channel.id)
-            )
-            await db.commit()
+        await self.db.log_channels.replace_one(
+            {"guild_id": ctx.guild.id},
+            {"guild_id": ctx.guild.id, "channel_id": channel.id},
+            upsert=True
+        )
         
         await ctx.send(f"Log channel has been set to {channel.mention}.")
     
@@ -420,12 +401,11 @@ class RoleManager(commands.Cog, name="Role Management"):
         Usage: .roledesc <custom_name>
         Example: .roledesc staff
         """
-        async with aiosqlite.connect(self.db_path) as db:
-            async with db.execute(
-                'SELECT role_id, description FROM custom_roles WHERE guild_id = ? AND custom_name = ?',
-                (ctx.guild.id, custom_name.lower())
-            ) as cursor:
-                roles = await cursor.fetchall()
+        cursor = self.db.custom_roles.find({
+            "guild_id": ctx.guild.id,
+            "custom_name": custom_name.lower()
+        })
+        roles = await cursor.to_list(length=None)
         
         if not roles:
             await ctx.send(f"No custom role with the name '{custom_name}' exists.")
@@ -436,12 +416,12 @@ class RoleManager(commands.Cog, name="Role Management"):
             color=discord.Color.blue()
         )
         
-        for role_id, description in roles:
-            role = ctx.guild.get_role(role_id)
+        for role_doc in roles:
+            role = ctx.guild.get_role(role_doc["role_id"])
             if role:
                 embed.add_field(
                     name=role.name,
-                    value=description or "No description provided",
+                    value=role_doc.get("description") or "No description provided",
                     inline=False
                 )
         
@@ -487,21 +467,23 @@ class RoleManager(commands.Cog, name="Role Management"):
             await ctx.send("You must specify at least one role.")
             return
         
-        async with aiosqlite.connect(self.db_path) as db:
-            # First remove existing mappings
-            await db.execute(
-                'DELETE FROM custom_roles WHERE guild_id = ? AND custom_name = ?',
-                (ctx.guild.id, custom_name.lower())
-            )
-            
-            # Add new mappings
-            for role in roles:
-                await db.execute(
-                    'INSERT INTO custom_roles (guild_id, custom_name, role_id) VALUES (?, ?, ?)',
-                    (ctx.guild.id, custom_name.lower(), role.id)
-                )
-            
-            await db.commit()
+        # First remove existing mappings
+        await self.db.custom_roles.delete_many({
+            "guild_id": ctx.guild.id,
+            "custom_name": custom_name.lower()
+        })
+        
+        # Add new mappings
+        documents = []
+        for role in roles:
+            documents.append({
+                "guild_id": ctx.guild.id,
+                "custom_name": custom_name.lower(),
+                "role_id": role.id,
+                "description": None
+            })
+        
+        await self.db.custom_roles.insert_many(documents)
         
         role_mentions = ", ".join(role.mention for role in roles)
         await ctx.send(f"Custom role '{custom_name}' has been mapped to: {role_mentions}")
@@ -578,6 +560,10 @@ class RoleManager(commands.Cog, name="Role Management"):
         if isinstance(error, commands.CommandNotFound):
             # The on_message event will handle custom role commands
             pass
+    
+    def cog_unload(self):
+        """Close MongoDB connection when cog is unloaded"""
+        self.client.close()
 
 async def setup(bot):
     await bot.add_cog(RoleManager(bot))
